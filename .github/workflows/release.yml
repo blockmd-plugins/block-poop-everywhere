@@ -79,7 +79,7 @@ jobs:
                   "checklist", "form_layout", "multi_notebook", "kv_tooltip",
                   "sidebar_sections", "file_badges", "sidebar_menu", "backdrops",
                   "status_icon", "toast_icon", "notes_open", "log_actions",
-                  "action_progress", "panel_toggle",
+                  "action_progress", "panel_toggle", "editor_insert_mode", "dialog_token",
               ],
           }
 
@@ -230,10 +230,30 @@ jobs:
               data_dir = root / "Data"
               for directory in (notebook, downloads, data_dir):
                   directory.mkdir()
+              protected_samples = [
+                  "> [poop:classic] user example <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] bq fence <!-- block-poop-everywhere:drop -->",
+                  "  > [poop:classic] list fence <!-- block-poop-everywhere:drop -->",
+                  " \t> [poop:classic] tab indented <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] html block <!-- block-poop-everywhere:drop -->",
+                  "LineBefore\u2028> [poop:classic] ls sep <!-- block-poop-everywhere:drop -->",
+              ]
               notes = {
-                  NOTE_NAME: "# Demo\n\n~~~md\n> [poop:classic] user example\n~~~\n\nHello Block.\n",
+                  NOTE_NAME: (
+                      "# Demo\n\n"
+                      "~~~md\n" + protected_samples[0] + "\n~~~\n\n"
+                      "> ```md\n" + protected_samples[1] + "\n> ```\n\n"
+                      "- ```md\n" + protected_samples[2] + "\n  ```\n\n"
+                      + protected_samples[3] + "\n\n"
+                      "<pre>\n" + protected_samples[4] + "\n</pre>\n\n"
+                      + protected_samples[5] + "\n\n"
+                      "Hello Block.\n"
+                  ),
                   " A.md": "# Leading Space Note\n",
                   "A.md": "# Normal Note\n",
+                  "Notes.MD": "# Uppercase Extension\n",
+                  "Extra.markdown": "# Markdown Extension\n",
+                  "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
               }
               storage = {}
               backdrop_state = {
@@ -249,7 +269,8 @@ jobs:
               status_state = {}
               titlebar_state = {}
               panel_state = {"open": False}
-              dialog_disabled = {"flag": False}
+              dialog_mode = {"state": "ok", "seq": 0}
+              active_selection = {"note": "WrapTarget.md", "text": "first\n\nsecond"}
               toasts = []
               opened_notes = []
 
@@ -266,7 +287,7 @@ jobs:
                   if method == "host.notebooks.list":
                       return {"notebooks": [{"path": str(notebook), "name": NOTEBOOK_NAME, "active": True}]}
                   if method == "host.notes.list":
-                      return {"notes": [{"path": p, "title": p[:-3]} for p in sorted(notes)]}
+                      return {"notes": [{"path": p, "title": os.path.splitext(p)[0]} for p in sorted(notes)]}
                   if method == "host.notes.read":
                       p = params["path"]
                       require(p in notes, f"host.notes.read unknown path: {p!r}")
@@ -285,11 +306,25 @@ jobs:
                       opened_notes.append((params.get("notebook_root", ""), params["path"]))
                       return {"ok": True}
                   if method == "host.editor.selection":
-                      return {"note": NOTE_NAME, "text": "Hello", "has_selection": True}
+                      return {
+                          "note": active_selection["note"],
+                          "text": active_selection["text"],
+                          "has_selection": bool(active_selection["text"]),
+                      }
                   if method == "host.editor.insert":
                       target = params.get("note") or NOTE_NAME
                       text = params.get("text", "")
-                      notes[target] = notes.get(target, "") + "\n" + text + "\n"
+                      mode = params.get("mode") or "replace"
+                      cur = notes.get(target, "")
+                      sel = active_selection["text"] if active_selection["note"] == target else ""
+                      if sel and sel in cur:
+                          if mode == "replace":
+                              notes[target] = cur.replace(sel, text, 1)
+                          else:
+                              idx = cur.index(sel) + len(sel)
+                              notes[target] = cur[:idx] + text + cur[idx:]
+                      else:
+                          notes[target] = cur + text
                       return {"ok": True, "path": target}
                   if method == "host.titlebar.set_button":
                       titlebar_state[params.get("id", "")] = params
@@ -299,6 +334,7 @@ jobs:
                       return {"ok": True}
                   if method == "host.sidebar.set_badges":
                       require("badge_id" in params, "host.sidebar.set_badges requires badge_id")
+                      require(len(params.get("entries") or {}) <= 512, "host.sidebar.set_badges exceeded 512 entries")
                       if params.get("clear"):
                           badges_state.clear()
                       else:
@@ -331,9 +367,12 @@ jobs:
                       panel_state["open"] = False
                       return {"ok": True}
                   if method == "host.ui.open_dialog":
-                      if dialog_disabled["flag"]:
+                      if dialog_mode["state"] == "error":
                           return {"__rpc_error__": {"code": -32601, "message": "dialog unavailable"}}
-                      return {"ok": True}
+                      if dialog_mode["state"] == "false":
+                          return {"ok": False}
+                      dialog_mode["seq"] += 1
+                      return {"ok": True, "dialog_token": f"dlg-{dialog_mode['seq']}"}
                   if method in ("host.ui.open_settings", "host.ui.close_dialog", "host.ui.refresh", "host.action.progress"):
                       return {"ok": True}
                   if method == "host.perf.snapshot":
@@ -389,6 +428,7 @@ jobs:
                   init = rpc("plugin.initialize", {
                       "locale": locale, "data_dir": str(data_dir), "downloads_dir": str(downloads),
                       "notebook_root": str(notebook), "ui_capabilities": capabilities,
+                      "theme": "light", "tarot": False,
                   })
                   require(init.get("ready") is True, f"{locale}/{layout}: plugin is not ready")
                   pages_by_surface = {}
@@ -402,8 +442,23 @@ jobs:
                       print(f"{locale}/{layout} {surface}: {count} renders passed")
                   if actions:
                       for cmd in commands:
+                          if cmd["id"] == "open_flush_dialog":
+                              continue
                           res = rpc("plugin.command", {"command_id": cmd["id"], "context": {"note": NOTE_NAME, "source": "palette"}})
                           check_text(res, locale, f"{locale} command {cmd['id']}", allow_fixture=True)
+                      # Regression: non-destructive drop with active selection MUST preserve selected text.
+                      res_nd = rpc("plugin.command", {"command_id": "drop_here", "context": {"note": "WrapTarget.md", "source": "palette"}})
+                      require(res_nd.get("ok") is True and "first\n\nsecond" in notes["WrapTarget.md"],
+                              f"{locale}: drop_here overwrote active selection")
+                      # Regression: wrap selection then flush MUST restore wrapped text byte-for-byte.
+                      rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
+                      before_wrap = notes["WrapTarget.md"]
+                      res_wrap = rpc("plugin.command", {"command_id": "poopify_selection", "context": {"note": "WrapTarget.md", "selection": "first\n\nsecond", "source": "editor_menu"}})
+                      require(res_wrap.get("ok") is True and "[poop:wrap-start]" in notes["WrapTarget.md"] and "[poop:wrap-end]" in notes["WrapTarget.md"],
+                              f"{locale}: poopify_selection did not emit lossless wrap markers")
+                      res_unwrap = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
+                      require(res_unwrap.get("ok") is True and notes["WrapTarget.md"] == before_wrap,
+                              f"{locale}: wrap->flush round-trip altered user text: {notes['WrapTarget.md']!r} != {before_wrap!r}")
                       # Regression: sidebar_menu preserves leading space and never touches wrong note or falls back.
                       res_space = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": " A.md", "source": "sidebar_menu"}})
                       require(res_space.get("ok") is True, f"{locale}: sidebar drop on ' A.md' failed")
@@ -411,13 +466,38 @@ jobs:
                               f"{locale}: sidebar_menu wrote wrong note")
                       res_empty = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": "", "source": "sidebar_menu"}})
                       require(res_empty.get("ok") is False, f"{locale}: empty sidebar_menu target must not fall back")
+                      # Regression: uppercase .MD and .markdown notes produce valid open_target action IDs.
+                      for ext_note in ("Notes.MD", "Extra.markdown"):
+                          r_ext = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": ext_note, "source": "sidebar_menu"}})
+                          require(r_ext.get("ok") is True, f"{locale}: drop failed on {ext_note}")
+                      panel_page = rpc("plugin.render", {"surface": "panel:poop-board"})["page"]
+                      panel_entries = panel_page["cards"][1]["items"][0]["entries"]
+                      by_title = {e["title"]: e for e in panel_entries}
+                      for ext_note in ("Notes.MD", "Extra.markdown"):
+                          aid = by_title.get(ext_note, {}).get("action_id", "")
+                          require(aid.startswith("open_target:") and len(aid) == 28, f"{locale}: missing/invalid action_id for {ext_note}: {aid!r}")
+                      # Regression: theme.changed preserves base theme across Tarot toggle.
                       for ev_params in (
                           {"event": "note.saved", "path": NOTE_NAME, "notebook_root": str(notebook)},
                           {"event": "note.opened", "path": NOTE_NAME},
                           {"event": "theme.changed", "theme": "dark"},
+                          {"event": "theme.changed", "tarot": True},
+                          {"event": "theme.changed", "tarot": False},
                           {"event": "locale.changed", "locale": locale},
                       ):
                           rpc("plugin.event", ev_params)
+                      settings_after_theme = rpc("plugin.render", {"surface": "settings_page"})["page"]
+                      kv_rows = settings_after_theme["cards"][2]["items"][2]["rows"]
+                      require("dark" in kv_rows[-1]["value"] and "tarot" not in kv_rows[-1]["value"],
+                              f"{locale}: theme.changed lost base theme across tarot toggle: {kv_rows[-1]['value']!r}")
+                      # Regression: invalid archive_dir must return explicit error (no silent Downloads fallback).
+                      bad_export = rpc("plugin.action", {
+                          "action_id": "export_guide",
+                          "surface": "settings_page",
+                          "values": {"archive_dir": str(root / "does-not-exist")},
+                      })
+                      require(bad_export.get("ok") is False, f"{locale}: invalid archive_dir should fail export_guide")
+                      rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"archive_dir": ""}})
                       for act_id, surface in (
                           ("drop_now", "settings_page"),
                           ("rescan_notes", "settings_page"),
@@ -437,19 +517,31 @@ jobs:
                               f"{locale}: sidebar drop list missing open_target action_id")
                       open_res = rpc("plugin.action", {"action_id": log_entries[0]["action_id"], "surface": "sidebar_section:today-drops", "values": {}})
                       require(open_res.get("ok") is True and opened_notes, f"{locale}: open_target did not invoke host.notes.open")
-                      # Regression: unavailable dialog must NEVER silently flush notes.
-                      dialog_disabled["flag"] = True
-                      abort_res = rpc("plugin.action", {"action_id": "open_flush", "surface": "settings_page", "values": {}})
-                      dialog_disabled["flag"] = False
-                      require(abort_res.get("ok") is False, f"{locale}: open_flush must fail when dialog unavailable")
-                      require("block-poop-everywhere:drop" in notes[" A.md"], f"{locale}: open_flush deleted notes without dialog")
-                      # Render flush dialog to mint confirmation token, then confirm flush.
+                      # Regression: pure dialog render MUST NOT mint a flush token.
                       rpc("plugin.render", {"surface": "dialog:flush-confirm"})
+                      stale_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      require(stale_res.get("ok") is False, f"{locale}: pure dialog render must not authorize flush")
+                      # Regression: unavailable dialog (RPC error or ok:false) must NEVER silently flush or authorize flush.
+                      for bad_mode in ("error", "false"):
+                          dialog_mode["state"] = bad_mode
+                          abort_res = rpc("plugin.action", {"action_id": "open_flush", "surface": "settings_page", "values": {}})
+                          dialog_mode["state"] = "ok"
+                          require(abort_res.get("ok") is False, f"{locale}: open_flush must fail when dialog mode={bad_mode}")
+                          reject_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                          require(reject_res.get("ok") is False, f"{locale}: confirm must reject after failed open_flush ({bad_mode})")
+                      require("block-poop-everywhere:drop" in notes[" A.md"], f"{locale}: failed dialog paths deleted notes")
+                      # Real host-bound dialog open -> single-use confirm -> replay rejected.
+                      open_dlg = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
+                      require(open_dlg.get("ok") is True, f"{locale}: open_flush_dialog failed: {open_dlg}")
                       flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
                       require(flush_res.get("ok") is True, f"{locale} dialog_flush_confirm failed: {flush_res}")
-                      require("> [poop:classic] user example" in notes[NOTE_NAME], f"{locale}: flush deleted user code fence line")
-                      require("block-poop-everywhere:drop" not in notes[NOTE_NAME] and "block-poop-everywhere:drop" not in notes[" A.md"],
-                              f"{locale}: flush left plugin markers behind")
+                      replay_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      require(replay_res.get("ok") is False, f"{locale}: duplicate confirm replay must be rejected")
+                      # Regression: all CommonMark protected containers + U+2028 MUST survive flush byte-for-byte.
+                      for sample in protected_samples:
+                          require(sample in notes[NOTE_NAME], f"{locale}: flush corrupted protected sample: {sample!r}")
+                      require("block-poop-everywhere:drop" not in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["Notes.MD"],
+                              f"{locale}: flush left top-level plugin markers behind")
                   require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
                   require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully")
                   return pages_by_surface
