@@ -8,6 +8,7 @@ Demonstrates every Block plugin extension point and declarative UI control:
 - Custom vector editor backdrops (scatter / grid / watermark / corners + dark glow)
 - Right side panel + bottom status bar with icon + modal dialog + icon toasts
 - Built-in Appearance settings section + full 14-control plugin settings page
+- Everyday settings stay to three choices: how many, backdrop on/off, and caption
 - Optimistic note read/write, note opening, live progress, save & workspace hooks
 """
 
@@ -26,7 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.9"
+PLUGIN_VERSION = "1.0.10"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -187,7 +188,7 @@ STRINGS = {
         "act_keep": "先留着",
         "act_confirm_flush": "确认冲掉",
         "card_how": "怎么拉",
-        "card_how_meta": "全部 14 种控件示范",
+        "card_how_meta": "其余都按默认来",
         "card_where": "允许拉屎的笔记本",
         "card_stats": "战况与空间分布",
         "card_map": "开发者扩展点速查表",
@@ -199,7 +200,7 @@ STRINGS = {
         "card_sidebar": "今日屎迹",
         "card_dialog": "清理确认",
         "lbl_style": "拉屎风格",
-        "lbl_bg_enabled": "把编辑区背景也拉满",
+        "lbl_bg_enabled": "编辑区背景",
         "lbl_bg_backdrop": "背景图标款型",
         "lbl_bg_pattern": "平铺布局",
         "lbl_bg_density": "背景浓度",
@@ -220,7 +221,7 @@ STRINGS = {
         "lbl_sidebar_empty": "今天还很干净，点下方按钮拉一坨",
         "lbl_map_empty": "暂无扩展点映射",
         "badge_current": "当前",
-        "styles": {"shy": "含蓄", "normal": "正常", "wild": "放肆"},
+        "styles": {"shy": "1 坨", "normal": "1 坨", "wild": "3 坨"},
         "shapes": {"classic": "经典三层", "ribbon": "细长条", "pellet": "一小粒"},
         "backdrops": {"poop-wallpaper": "满屏屎印", "poop-watermark": "居中大屎印"},
         "patterns": {"scatter": "错行斜铺", "grid": "规整矩阵", "watermark": "居中水印", "corners": "四角点缀"},
@@ -340,7 +341,7 @@ STRINGS = {
         "act_keep": "Keep for Now",
         "act_confirm_flush": "Confirm Flush",
         "card_how": "How to Drop",
-        "card_how_meta": "All 14 UI Controls Demo",
+        "card_how_meta": "Everything else stays default",
         "card_where": "Allowed Notebooks",
         "card_stats": "Status & Breakdown",
         "card_map": "Developer Extension Map",
@@ -351,8 +352,8 @@ STRINGS = {
         "card_panel_ops": "Quick Actions",
         "card_sidebar": "Today's Drops",
         "card_dialog": "Flush Confirmation",
-        "lbl_style": "Drop Intensity",
-        "lbl_bg_enabled": "Fill Editor Background",
+        "lbl_style": "How many at once",
+        "lbl_bg_enabled": "Editor backdrop",
         "lbl_bg_backdrop": "Backdrop Motif",
         "lbl_bg_pattern": "Pattern Layout",
         "lbl_bg_density": "Backdrop Density",
@@ -373,7 +374,7 @@ STRINGS = {
         "lbl_sidebar_empty": "Clean so far. Use buttons below to test.",
         "lbl_map_empty": "No extension entries",
         "badge_current": "Active",
-        "styles": {"shy": "Subtle", "normal": "Normal", "wild": "Wild"},
+        "styles": {"shy": "1 drop", "normal": "1 drop", "wild": "3 drops"},
         "shapes": {"classic": "Classic Swirl", "ribbon": "Long Ribbon", "pellet": "Tiny Pellet"},
         "backdrops": {"poop-wallpaper": "Poop Wallpaper", "poop-watermark": "Center Watermark"},
         "patterns": {"scatter": "Scattered", "grid": "Grid", "watermark": "Watermark", "corners": "Corners"},
@@ -2779,59 +2780,12 @@ class PoopEverywherePlugin:
 
     def render_settings_page(self, bridge):
         t = self.t()
-        notebooks = self.list_notebooks(bridge)
-        self.ensure_selected_notebooks(notebooks)
-        total, notes = self.active_counts_summary()
-
-        perf = self.best_effort_call(bridge, "host.perf.snapshot", {"refresh_disk": False})
-        if isinstance(perf, dict) and isinstance(perf.get("rss_bytes"), (int, float)):
-            self.last_rss_bytes = int(perf["rss_bytes"])
-
-        nb_options = []
-        for nb in notebooks:
-            path = str(nb.get("path") or "")
-            if not path:
-                continue
-            opt = {
-                "value": path,
-                "label": str(nb.get("name") or os.path.basename(path) or path),
-                "detail": path,
-                "tooltip": path,
-            }
-            if nb.get("active"):
-                opt["badge"] = t["badge_current"]
-            nb_options.append(opt)
-
-        body_weight = max(self.state["total_dropped"], total, 1)
-        bg_weight = max(self.state["bg_toggles"] + (1 if self.config["bg_enabled"] else 0), 1)
-        sidebar_weight = max(self.state["sidebar_hits"] + notes, 1)
-        dialog_weight = max(self.state["dialog_opens"] + self.state["total_flushed"], 1)
-        interaction_total = body_weight + bg_weight + sidebar_weight + dialog_weight
-
-        log_entries = [self.render_log_entry(item) for item in self.state["logs"][:8]]
-        map_entries = [
-            {"title": key, "status": "→", "time": perm, "tooltip": f"{key} ({perm})"}
-            for key, perm in EXTENSION_MAP
-        ]
-
-        metrics = [
-            {"label": t["m_active"], "value": t["m_unit_drop"].format(n=total), "tone": "ai_sessions"},
-            {"label": t["m_notes"], "value": t["m_unit_note"].format(n=notes), "tone": "notes"},
-            {"label": t["m_flushed"], "value": t["m_unit_drop"].format(n=self.state["total_flushed"]), "tone": "assets"},
-        ]
-        if self.last_rss_bytes > 0:
-            metrics.append({"label": t["m_rss"], "value": format_bytes_mb(self.last_rss_bytes), "tone": "config"})
-
+        total, _notes = self.active_counts_summary()
         page_status = t["status_count"].format(n=total) if total > 0 else ""
 
         return {
             "title": t["title"],
             "status": page_status,
-            "header_actions": [
-                {"id": "drop_now", "label": t["act_drop_now"], "variant": "primary"},
-                {"id": "export_guide", "label": t["act_export"], "variant": "secondary"},
-                {"id": "open_flush", "label": t["act_flush_all"], "variant": "danger"},
-            ],
             "cards": [
                 {
                     "id": "how-card",
@@ -2852,206 +2806,19 @@ class PoopEverywherePlugin:
                             "value": self.config["bg_enabled"],
                         },
                         {
-                            "kind": "group",
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                            "fields": [
-                                {
-                                    "kind": "select",
-                                    "id": "bg_backdrop",
-                                    "label": t["lbl_bg_backdrop"],
-                                    "value": self.config["bg_backdrop"],
-                                    "options": [
-                                        {"value": "poop-wallpaper", "label": t["backdrops"]["poop-wallpaper"]},
-                                        {"value": "poop-watermark", "label": t["backdrops"]["poop-watermark"]},
-                                    ],
-                                },
-                                {
-                                    "kind": "select",
-                                    "id": "bg_pattern",
-                                    "label": t["lbl_bg_pattern"],
-                                    "value": self.config["bg_pattern"],
-                                    "options": [{"value": v, "label": t["patterns"][v]} for v in PATTERNS],
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "group",
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                            "fields": [
-                                {
-                                    "kind": "segmented",
-                                    "id": "bg_density",
-                                    "label": t["lbl_bg_density"],
-                                    "value": self.config["bg_density"],
-                                    "options": [{"value": v, "label": t["densities"][v]} for v in DENSITIES],
-                                },
-                                {
-                                    "kind": "select",
-                                    "id": "bg_tint",
-                                    "label": t["lbl_bg_tint"],
-                                    "value": self.config["bg_tint"],
-                                    "options": [{"value": v, "label": t["tints"][v]} for v in TINTS],
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "switch",
-                            "id": "bg_dark_glow",
-                            "label": t["lbl_dark_glow"],
-                            "value": self.config["bg_dark_glow"],
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                        },
-                        {
-                            "kind": "group",
-                            "fields": [
-                                {
-                                    "kind": "select",
-                                    "id": "shape",
-                                    "label": t["lbl_shape"],
-                                    "value": self.config["shape"],
-                                    "options": [{"value": v, "label": t["shapes"][v]} for v in SHAPES],
-                                },
-                                {
-                                    "kind": "input",
-                                    "id": "caption",
-                                    "label": t["lbl_caption"],
-                                    "value": self.config["caption"],
-                                    "placeholder": t["ph_caption"],
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "secret",
-                            "id": "flush_secret",
-                            "label": t["lbl_secret"],
-                            "value": self.config["flush_secret"],
-                            "placeholder": t["ph_secret"],
-                        },
-                        {
-                            "kind": "folder",
-                            "id": "archive_dir",
-                            "label": t["lbl_archive"],
-                            "value": self.config["archive_dir"],
+                            "kind": "input",
+                            "id": "caption",
+                            "label": t["lbl_caption"],
+                            "value": self.config["caption"],
+                            "placeholder": t["ph_caption"],
                         },
                         {
                             "kind": "actions",
                             "buttons": [
                                 {"id": "save_prefs", "label": t["act_save"], "variant": "primary"},
-                                {"id": "demo_toasts", "label": t["act_demo_toast"], "variant": "secondary"},
-                                {"id": "rescan_notes", "label": t["act_rescan"], "variant": "secondary"},
+                                {"id": "open_flush", "label": t["act_flush_all"], "variant": "danger"},
                             ],
                         },
-                    ],
-                },
-                {
-                    "id": "notebooks-card",
-                    "title": t["card_where"],
-                    "items": [
-                        {
-                            "kind": "checklist",
-                            "id": "selected_notebooks",
-                            "value": self.config["selected_notebooks"],
-                            "empty_text": t["lbl_notebooks_empty"],
-                            "options": nb_options,
-                        }
-                    ],
-                },
-                {
-                    "id": "stats-card",
-                    "title": t["card_stats"],
-                    "items": [
-                        {"kind": "metrics", "metrics": metrics},
-                        {
-                            "kind": "treemap",
-                            "id": "surface-breakdown",
-                            "total_bytes": interaction_total * 1024,
-                            "summary": {
-                                "total_label": t["tm_total_label"],
-                                "total_value": t["tm_total_val"].format(n=interaction_total),
-                                "sub_text": t["tm_sub"],
-                                "metrics": [{"label": t["tm_file_count"], "value": "4"}],
-                            },
-                            "tiles": [
-                                {
-                                    "id": "ai_sessions",
-                                    "label": t["tm_body"],
-                                    "detail": t["tm_body_detail"],
-                                    "bytes": body_weight * 1024,
-                                    "file_count": max(notes, 1),
-                                    "color": "ai_sessions",
-                                    "entries": [
-                                        {"name": rel, "bytes": cnt * 1024, "count": cnt}
-                                        for rel, cnt in sorted(self.note_counts().items())[:6]
-                                    ],
-                                },
-                                {
-                                    "id": "config",
-                                    "label": t["tm_bg"],
-                                    "detail": t["tm_bg_detail"],
-                                    "bytes": bg_weight * 1024,
-                                    "file_count": 2,
-                                    "color": "config",
-                                },
-                                {
-                                    "id": "assets",
-                                    "label": t["tm_sidebar"],
-                                    "detail": t["tm_sidebar_detail"],
-                                    "bytes": sidebar_weight * 1024,
-                                    "file_count": 3,
-                                    "color": "assets",
-                                },
-                                {
-                                    "id": "history",
-                                    "label": t["tm_dialog"],
-                                    "detail": t["tm_dialog_detail"],
-                                    "bytes": dialog_weight * 1024,
-                                    "file_count": 2,
-                                    "color": "history",
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "kv",
-                            "rows": [
-                                {"label": t["kv_version"], "value": PLUGIN_VERSION, "tooltip": PLUGIN_ID},
-                                {"label": t["kv_last"], "value": self.state["last_drop_at"] or t["kv_never"]},
-                                {"label": t["kv_points"], "value": t["kv_points_val"], "tooltip": "contributes + host.*"},
-                                {
-                                    "label": t["kv_env"],
-                                    "value": f"Block {self.host_version or '1.x'} ({self.locale} / {self.host_theme + '+tarot' if self.tarot_active else self.host_theme})",
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "segmented",
-                            "id": "preview_mode",
-                            "label": t["lbl_preview_mode"],
-                            "value": self.config["preview_mode"],
-                            "options": [{"value": v, "label": t["preview_modes"][v]} for v in PREVIEW_MODES],
-                        },
-                        self.build_preview_item(),
-                        {
-                            "kind": "log_list",
-                            "id": "activity-log",
-                            "label": t["lbl_logs"],
-                            "empty_text": t["lbl_logs_empty"],
-                            "entries": log_entries,
-                        },
-                    ],
-                },
-                {
-                    "id": "extension-map-card",
-                    "title": t["card_map"],
-                    "badge": t["card_map_badge"],
-                    "collapsible": True,
-                    "default_collapsed": True,
-                    "items": [
-                        {
-                            "kind": "log_list",
-                            "id": "extension-map",
-                            "empty_text": t["lbl_map_empty"],
-                            "entries": map_entries,
-                        }
                     ],
                 },
             ],
@@ -3071,47 +2838,6 @@ class PoopEverywherePlugin:
                             "id": "bg_enabled",
                             "label": t["lbl_bg_enabled"],
                             "value": self.config["bg_enabled"],
-                        },
-                        {
-                            "kind": "segmented",
-                            "id": "bg_density",
-                            "label": t["lbl_bg_density"],
-                            "value": self.config["bg_density"],
-                            "options": [{"value": v, "label": t["densities"][v]} for v in DENSITIES],
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                        },
-                        {
-                            "kind": "group",
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                            "fields": [
-                                {
-                                    "kind": "select",
-                                    "id": "bg_pattern",
-                                    "label": t["lbl_bg_pattern"],
-                                    "value": self.config["bg_pattern"],
-                                    "options": [{"value": v, "label": t["patterns"][v]} for v in PATTERNS],
-                                },
-                                {
-                                    "kind": "select",
-                                    "id": "bg_tint",
-                                    "label": t["lbl_bg_tint"],
-                                    "value": self.config["bg_tint"],
-                                    "options": [{"value": v, "label": t["tints"][v]} for v in TINTS],
-                                },
-                            ],
-                        },
-                        {
-                            "kind": "switch",
-                            "id": "bg_dark_glow",
-                            "label": t["lbl_dark_glow"],
-                            "value": self.config["bg_dark_glow"],
-                            "visible_when": {"control_id": "bg_enabled", "equals": True},
-                        },
-                        {
-                            "kind": "actions",
-                            "buttons": [
-                                {"id": "reset_backdrop", "label": t["act_reset_bg"], "variant": "secondary"},
-                            ],
                         },
                     ],
                 }
@@ -3595,14 +3321,18 @@ class PoopEverywherePlugin:
             return {"handled": True}
 
         if ev == "theme.changed":
+            theme_changed = False
             if isinstance(params.get("theme"), str) and params["theme"].strip():
-                self.host_theme = params["theme"].strip()
+                next_theme = params["theme"].strip()
+                theme_changed = next_theme != self.host_theme
+                self.host_theme = next_theme
             if "tarot" in params:
-                self.tarot_active = bool(params.get("tarot"))
-            self.append_log("theme", tone="info")
-            self.save_state(bridge)
-            self.sync_host_ui(bridge)
-            self.refresh_other_surfaces(bridge)
+                next_tarot = bool(params.get("tarot"))
+                theme_changed = theme_changed or next_tarot != self.tarot_active
+                self.tarot_active = next_tarot
+            if theme_changed:
+                self.sync_host_ui(bridge)
+                self.refresh_other_surfaces(bridge)
             return {"handled": True}
 
         if ev == "locale.changed":
