@@ -78,7 +78,8 @@ jobs:
               "full": [
                   "checklist", "form_layout", "multi_notebook", "kv_tooltip",
                   "sidebar_sections", "file_badges", "sidebar_menu", "backdrops",
-                  "status_icon", "toast_icon", "notes_open", "log_actions", "action_progress",
+                  "status_icon", "toast_icon", "notes_open", "log_actions",
+                  "action_progress", "panel_toggle",
               ],
           }
 
@@ -229,20 +230,26 @@ jobs:
               data_dir = root / "Data"
               for directory in (notebook, downloads, data_dir):
                   directory.mkdir()
-              notes = {NOTE_NAME: "# Demo\n\nHello Block.\n"}
+              notes = {
+                  NOTE_NAME: "# Demo\n\n~~~md\n> [poop:classic] user example\n~~~\n\nHello Block.\n",
+                  " A.md": "# Leading Space Note\n",
+                  "A.md": "# Normal Note\n",
+              }
               storage = {}
               backdrop_state = {
                   "enabled": False,
-                  "backdrop_id": "poop-scatter",
+                  "id": "poop-wallpaper",
                   "pattern": "scatter",
                   "density": "medium",
-                  "opacity": 0.12,
-                  "tint": "warm",
-                  "dark_glow": True,
+                  "opacity": 0.10,
+                  "tint": "accent",
+                  "dark_glow": False,
               }
               badges_state = {}
               status_state = {}
               titlebar_state = {}
+              panel_state = {"open": False}
+              dialog_disabled = {"flag": False}
               toasts = []
               opened_notes = []
 
@@ -262,26 +269,28 @@ jobs:
                       return {"notes": [{"path": p, "title": p[:-3]} for p in sorted(notes)]}
                   if method == "host.notes.read":
                       p = params["path"]
-                      content = notes.get(p, "")
+                      require(p in notes, f"host.notes.read unknown path: {p!r}")
+                      content = notes[p]
                       return {"content": content, "revision": note_rev(content), "dirty": False}
                   if method == "host.notes.write":
                       p = params["path"]
                       exp = params.get("expected_revision")
                       if exp and p in notes and note_rev(notes[p]) != exp:
-                          raise ValueError("revision conflict")
+                          return {"__rpc_error__": {"code": -32006, "message": "revision conflict"}}
                       notes[p] = params["content"]
                       return {"ok": True, "revision": note_rev(notes[p])}
                   if method == "host.notes.active":
                       return {"active": True, "path": NOTE_NAME, "title": NOTE_NAME[:-3], "notebook_root": str(notebook)}
                   if method == "host.notes.open":
-                      opened_notes.append(params["path"])
+                      opened_notes.append((params.get("notebook_root", ""), params["path"]))
                       return {"ok": True}
                   if method == "host.editor.selection":
-                      return {"path": NOTE_NAME, "text": "Hello", "block_index": 1, "start": 0, "end": 5, "has_selection": True}
+                      return {"note": NOTE_NAME, "text": "Hello", "has_selection": True}
                   if method == "host.editor.insert":
+                      target = params.get("note") or NOTE_NAME
                       text = params.get("text", "")
-                      notes[NOTE_NAME] = notes.get(NOTE_NAME, "") + "\n" + text + "\n"
-                      return {"ok": True, "path": NOTE_NAME}
+                      notes[target] = notes.get(target, "") + "\n" + text + "\n"
+                      return {"ok": True, "path": target}
                   if method == "host.titlebar.set_button":
                       titlebar_state[params.get("id", "")] = params
                       return {"ok": True}
@@ -289,13 +298,20 @@ jobs:
                       status_state[params.get("id", "")] = params
                       return {"ok": True}
                   if method == "host.sidebar.set_badges":
-                      if params.get("mode", "replace") == "replace":
+                      require("badge_id" in params, "host.sidebar.set_badges requires badge_id")
+                      if params.get("clear"):
                           badges_state.clear()
-                      for b in params.get("badges") or []:
-                          badges_state[b["path"]] = b
+                      else:
+                          if not params.get("patch"):
+                              badges_state.clear()
+                          for rel, ent in (params.get("entries") or {}).items():
+                              if ent is None:
+                                  badges_state.pop(rel, None)
+                              else:
+                                  badges_state[rel] = ent
                       return {"ok": True, "count": len(badges_state)}
                   if method == "host.sidebar.get_badges":
-                      return {"badges": list(badges_state.values())}
+                      return {"entries": dict(badges_state)}
                   if method == "host.ui.backdrop":
                       return dict(backdrop_state)
                   if method == "host.ui.set_backdrop":
@@ -305,10 +321,23 @@ jobs:
                       check_text(params.get("message", ""), locale, f"{locale} toast", allow_fixture=True)
                       toasts.append(params)
                       return {"ok": True}
-                  if method in ("host.ui.open_panel", "host.ui.close_panel", "host.ui.open_dialog", "host.ui.open_settings", "host.ui.close_dialog", "host.ui.refresh", "host.action.progress"):
+                  if method == "host.ui.toggle_panel":
+                      panel_state["open"] = not panel_state["open"]
+                      return {"ok": True, "open": panel_state["open"]}
+                  if method == "host.ui.open_panel":
+                      panel_state["open"] = True
+                      return {"ok": True}
+                  if method == "host.ui.close_panel":
+                      panel_state["open"] = False
+                      return {"ok": True}
+                  if method == "host.ui.open_dialog":
+                      if dialog_disabled["flag"]:
+                          return {"__rpc_error__": {"code": -32601, "message": "dialog unavailable"}}
+                      return {"ok": True}
+                  if method in ("host.ui.open_settings", "host.ui.close_dialog", "host.ui.refresh", "host.action.progress"):
                       return {"ok": True}
                   if method == "host.perf.snapshot":
-                      return {"fps": 60.0, "memory_mb": 42.0, "note_count": len(notes)}
+                      return {"rss_bytes": 42 * 1024 * 1024, "note_count": len(notes)}
                   raise ValueError(f"Unexpected host request: {method}")
 
               env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "COMSPEC") if k in os.environ}
@@ -347,7 +376,10 @@ jobs:
                       if "method" in message:
                           result = host(message["method"], message.get("params", {}))
                           if "id" in message:
-                              send({"id": message["id"], "result": result})
+                              if isinstance(result, dict) and "__rpc_error__" in result:
+                                  send({"id": message["id"], "error": result["__rpc_error__"]})
+                              else:
+                                  send({"id": message["id"], "result": result})
                           continue
                       require(message.get("id") == request_id, f"{method}: unexpected response id")
                       require("error" not in message, f"{method}: {message.get('error')}")
@@ -370,12 +402,19 @@ jobs:
                       print(f"{locale}/{layout} {surface}: {count} renders passed")
                   if actions:
                       for cmd in commands:
-                          res = rpc("plugin.command", {"command_id": cmd["id"], "context": {"note_path": NOTE_NAME}})
+                          res = rpc("plugin.command", {"command_id": cmd["id"], "context": {"note": NOTE_NAME, "source": "palette"}})
                           check_text(res, locale, f"{locale} command {cmd['id']}", allow_fixture=True)
+                      # Regression: sidebar_menu preserves leading space and never touches wrong note or falls back.
+                      res_space = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": " A.md", "source": "sidebar_menu"}})
+                      require(res_space.get("ok") is True, f"{locale}: sidebar drop on ' A.md' failed")
+                      require("block-poop-everywhere:drop" in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["A.md"],
+                              f"{locale}: sidebar_menu wrote wrong note")
+                      res_empty = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": "", "source": "sidebar_menu"}})
+                      require(res_empty.get("ok") is False, f"{locale}: empty sidebar_menu target must not fall back")
                       for ev_params in (
                           {"event": "note.saved", "path": NOTE_NAME, "notebook_root": str(notebook)},
                           {"event": "note.opened", "path": NOTE_NAME},
-                          {"event": "theme.changed", "dark": True},
+                          {"event": "theme.changed", "theme": "dark"},
                           {"event": "locale.changed", "locale": locale},
                       ):
                           rpc("plugin.event", ev_params)
@@ -387,11 +426,30 @@ jobs:
                           ("apply_backdrop", "settings_section:poop-appearance"),
                           ("sidebar_drop", "sidebar_section:today-drops"),
                           ("panel_drop", "panel:poop-board"),
-                          ("dialog_flush_confirm", "dialog:flush-confirm"),
                       ):
                           res = rpc("plugin.action", {"action_id": act_id, "surface": surface, "values": {}})
                           require(res.get("ok") is True, f"{locale} action {act_id}: expected ok=True, got {res}")
                           check_text(res, locale, f"{locale} action {act_id}", allow_fixture=True)
+                      # Regression: clicking rendered log_list action opens bound notebook+note.
+                      sb_page = rpc("plugin.render", {"surface": "sidebar_section:today-drops"})["page"]
+                      log_entries = sb_page["cards"][0]["items"][0]["entries"]
+                      require(log_entries and log_entries[0].get("action_id", "").startswith("open_target:"),
+                              f"{locale}: sidebar drop list missing open_target action_id")
+                      open_res = rpc("plugin.action", {"action_id": log_entries[0]["action_id"], "surface": "sidebar_section:today-drops", "values": {}})
+                      require(open_res.get("ok") is True and opened_notes, f"{locale}: open_target did not invoke host.notes.open")
+                      # Regression: unavailable dialog must NEVER silently flush notes.
+                      dialog_disabled["flag"] = True
+                      abort_res = rpc("plugin.action", {"action_id": "open_flush", "surface": "settings_page", "values": {}})
+                      dialog_disabled["flag"] = False
+                      require(abort_res.get("ok") is False, f"{locale}: open_flush must fail when dialog unavailable")
+                      require("block-poop-everywhere:drop" in notes[" A.md"], f"{locale}: open_flush deleted notes without dialog")
+                      # Render flush dialog to mint confirmation token, then confirm flush.
+                      rpc("plugin.render", {"surface": "dialog:flush-confirm"})
+                      flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      require(flush_res.get("ok") is True, f"{locale} dialog_flush_confirm failed: {flush_res}")
+                      require("> [poop:classic] user example" in notes[NOTE_NAME], f"{locale}: flush deleted user code fence line")
+                      require("block-poop-everywhere:drop" not in notes[NOTE_NAME] and "block-poop-everywhere:drop" not in notes[" A.md"],
+                              f"{locale}: flush left plugin markers behind")
                   require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
                   require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully")
                   return pages_by_surface
@@ -662,8 +720,8 @@ jobs:
           HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
         run: |
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --title "${TITLE}" --notes-file release-notes.md --draft=false --latest
-            gh release upload "${TAG}" "${ARCHIVE}" --clobber
+            echo "ERROR: Release ${TAG} already exists. Never overwrite a published archive (SHA-256 immutability); bump version instead." >&2
+            exit 1
           else
             gh release create "${TAG}" "${ARCHIVE}" \
               --target "${HEAD_SHA}" \
