@@ -244,6 +244,9 @@ jobs:
                   ">     > [poop:classic] bq heading indented <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] nested lazy cont <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] multiline code span <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] nested lazy bare cont <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] code span lazy cont <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] code span ord2 <!-- block-poop-everywhere:drop -->",
               ]
               notes = {
                   NOTE_NAME: (
@@ -261,6 +264,9 @@ jobs:
                       "> # HeadingInsideBQ\n" + protected_samples[10] + "\n\n"
                       "> > nested paragraph\n" + protected_samples[11] + "\n\n"
                       "> example `start\n" + protected_samples[12] + "\n> end`\n\n"
+                      "> > nested bare\nlazy bare line\n" + protected_samples[13] + "\n\n"
+                      "> span `open\nlazy line inside span\n" + protected_samples[14] + "\n> close`\n\n"
+                      "> span `open2\n> 2. not a list\n" + protected_samples[15] + "\n> close2`\n\n"
                       "Hello Block.\n"
                   ),
                   "BOMFence.md": "\ufeff```md\n> [poop:classic] bom fence <!-- block-poop-everywhere:drop -->\n```\n",
@@ -569,8 +575,8 @@ jobs:
                       for special_note in ("NoEOL.md", "OnlyLF.md", "MixedEOL.md"):
                           sp_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": special_note}})
                           require(sp_drop.get("ok") is True, f"{locale}: {special_note} sidebar drop failed: {sp_drop}")
-                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB) must be refused without mutating note.
-                      for bad_sel in ("\nA\r", "A\n\n\n\nB"):
+                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB, > A\n\n> B) must be refused without mutating note.
+                      for bad_sel in ("\nA\r", "A\n\n\n\nB", "> A\n\n> B"):
                           before_wrap = notes["WrapTarget.md"]
                           bad_wrap = rpc("plugin.command", {
                               "command_id": "poopify_selection",

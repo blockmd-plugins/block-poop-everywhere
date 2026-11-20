@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.6"
+PLUGIN_VERSION = "1.0.7"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -666,6 +666,35 @@ def _is_bare_bq_sep(raw_line):
     return cols <= 3 and stripped_nl[idx:].rstrip(" \t") == ">"
 
 
+def _can_list_interrupt_paragraph(m_list, line):
+    """CommonMark §5.2: empty list items and ordered lists not starting at 1 cannot interrupt a paragraph."""
+    marker = m_list.group(2)
+    after = line[m_list.end():]
+    if after.strip(" \t") == "":
+        return False
+    if marker[-1] in (".", ")"):
+        return int(marker[:-1]) == 1
+    return True
+
+
+def _line_interrupts_bq_paragraph(stripped_nl, cols):
+    """CommonMark §5.1: determine whether a non-'>' line breaks an open blockquote paragraph."""
+    if stripped_nl.strip(" \t") == "":
+        return True
+    if cols <= 3:
+        m_open = FENCE_OPEN_RE.match(stripped_nl)
+        if m_open and not (m_open.group(1)[0] == "`" and "`" in m_open.group(2)):
+            return True
+        if html_block_end_kind(stripped_nl, allow_type7=False) is not None:
+            return True
+        if ATX_HEADING_RE.match(stripped_nl) or THEMATIC_BREAK_RE.match(stripped_nl):
+            return True
+        m_list = LIST_ITEM_RE.match(stripped_nl)
+        if m_list and _can_list_interrupt_paragraph(m_list, stripped_nl):
+            return True
+    return False
+
+
 def _commonmark_code_span_ranges(para_text):
     """Return list of (start, end) character ranges of CommonMark §6.1 inline code spans."""
     ranges = []
@@ -786,9 +815,17 @@ def iter_markdown_lines(content):
             in_paragraph = False
             continue
 
-        # Reset blockquote-nested state on lines that don't continue a blockquote
+        # Handle lines without a leading '>' prefix: either lazy continuation of an
+        # open blockquote paragraph (CommonMark §5.1) or blockquote termination.
         bq_inner, bq_col = strip_single_bq_prefix(stripped_nl, 0)
         if bq_inner is None:
+            if (bq_in_paragraph or bq_in_nested_para) and not _line_interrupts_bq_paragraph(stripped_nl, cols):
+                if bq_in_nested_para:
+                    records.append([raw_line, False, None, False])
+                else:
+                    records.append([raw_line, False, stripped_nl, True])
+                in_paragraph = False
+                continue
             bq_fence_char = ""
             bq_fence_len = 0
             bq_fence_list_indent = None
@@ -868,9 +905,9 @@ def iter_markdown_lines(content):
             records.append([raw_line, False, None, False])
             continue
 
-        # 8. List item open (bullet or ordered) — including `- ``` ` on same line
+        # 8. List item open (bullet or ordered) — respecting CommonMark §5.2 paragraph interruption
         m_list = LIST_ITEM_RE.match(stripped_nl)
-        if m_list:
+        if m_list and ((not in_paragraph) or _can_list_interrupt_paragraph(m_list, stripped_nl)):
             list_indents.append(list_item_content_indent(stripped_nl, 0, m_list))
             after_marker = stripped_nl[m_list.end():]
             m_lf = FENCE_OPEN_RE.match(after_marker)
@@ -985,7 +1022,7 @@ def iter_markdown_lines(content):
                     bq_in_nested_para = False
                     continue
                 m_blist = LIST_ITEM_RE.match(bq_inner)
-                if m_blist:
+                if m_blist and ((not bq_in_paragraph and not bq_in_nested_para) or _can_list_interrupt_paragraph(m_blist, bq_inner)):
                     bq_list_indents.append(list_item_content_indent(bq_inner, bq_col, m_blist))
                     after_bm = bq_inner[m_blist.end():]
                     m_blf = FENCE_OPEN_RE.match(after_bm)
@@ -1437,6 +1474,8 @@ class PoopEverywherePlugin:
         fence_len = 0
         html_kind = None
         blank_run = 0
+        prev_was_bq = False
+        saw_blank_after_bq = False
         for raw in lines:
             s = raw.rstrip("\n")
             is_blank = s.strip(" \t") == ""
@@ -1447,6 +1486,8 @@ class PoopEverywherePlugin:
                     if mc and mc.group(1)[0] == fence_ch and len(mc.group(1)) >= fence_len:
                         in_fence = False
                 blank_run = 0
+                prev_was_bq = False
+                saw_blank_after_bq = False
                 continue
             if html_kind is not None:
                 if html_kind == "blank" and is_blank:
@@ -1456,13 +1497,24 @@ class PoopEverywherePlugin:
                 if html_block_closes(html_kind, s):
                     html_kind = None
                 blank_run = 0
+                prev_was_bq = False
+                saw_blank_after_bq = False
                 continue
             if is_blank:
                 blank_run += 1
                 if blank_run >= 2:
                     return False
+                if prev_was_bq:
+                    saw_blank_after_bq = True
                 continue
             blank_run = 0
+            cur_is_bq = strip_single_bq_prefix(s, 0)[0] is not None
+            if cur_is_bq and saw_blank_after_bq:
+                # Block's serializer merges consecutive separate blockquotes ("> A\n\n> B")
+                # into a single blockquote ("> A\n>\n> B"), so wrapping cannot round-trip losslessly.
+                return False
+            prev_was_bq = cur_is_bq
+            saw_blank_after_bq = False
             if cols <= 3:
                 mo = FENCE_OPEN_RE.match(s)
                 if mo and not (mo.group(1)[0] == "`" and "`" in mo.group(2)):
