@@ -291,9 +291,9 @@ jobs:
                   "LegacyWrap2.md": "> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n>\n> A\n>\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->",
                   "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
               }
-              storage = {}
+              storage = {"config": {"bg_enabled": False}} if layout == "legacy" else {}
               backdrop_state = {
-                  "enabled": False,
+                  "enabled": layout == "legacy",
                   "id": "poop-wallpaper",
                   "pattern": "scatter",
                   "density": "medium",
@@ -472,6 +472,8 @@ jobs:
                       "theme": "light", "tarot": False,
                   })
                   require(init.get("ready") is True, f"{locale}/{layout}: plugin is not ready")
+                  require(backdrop_state["enabled"] is (layout != "legacy"),
+                          f"{locale}/{layout}: default or saved backdrop setting not applied at initialization")
                   pages_by_surface = {}
                   for surface in surfaces:
                       initial = rpc("plugin.render", {"surface": surface})["page"]
@@ -482,6 +484,13 @@ jobs:
                       count = check_renders(rpc, locale, surface)
                       print(f"{locale}/{layout} {surface}: {count} renders passed")
                   if actions:
+                      appearance = "settings_section:poop-appearance"
+                      rpc("plugin.render", {"surface": appearance, "values": {"bg_enabled": False}})
+                      require(backdrop_state["enabled"] is False and storage["config"]["bg_enabled"] is False,
+                              f"{locale}: turning off the backdrop in settings did not immediately apply and persist")
+                      rpc("plugin.render", {"surface": appearance, "values": {"bg_enabled": True, "bg_density": "dense"}})
+                      require(backdrop_state["enabled"] is True and backdrop_state["density"] == "dense",
+                              f"{locale}: backdrop settings did not immediately apply")
                       for cmd in commands:
                           if cmd["id"] == "open_flush_dialog":
                               continue
@@ -550,7 +559,6 @@ jobs:
                           ("rescan_notes", "settings_page"),
                           ("demo_toasts", "settings_page"),
                           ("export_guide", "settings_page"),
-                          ("apply_backdrop", "settings_section:poop-appearance"),
                           ("sidebar_drop", "sidebar_section:today-drops"),
                           ("panel_drop", "panel:poop-board"),
                       ):
@@ -559,6 +567,9 @@ jobs:
                           check_text(res, locale, f"{locale} action {act_id}", allow_fixture=True)
                       # Regression: clicking rendered log_list action opens bound notebook+note.
                       sb_page = rpc("plugin.render", {"surface": "sidebar_section:today-drops"})["page"]
+                      sidebar_buttons = sb_page["cards"][0]["items"][1]["buttons"]
+                      require([button["id"] for button in sidebar_buttons] == ["sidebar_drop"],
+                              f"{locale}: sidebar should only offer the drop button")
                       log_entries = sb_page["cards"][0]["items"][0]["entries"]
                       require(log_entries and log_entries[0].get("action_id", "").startswith("open_target:"),
                               f"{locale}: sidebar drop list missing open_target action_id")
@@ -627,6 +638,8 @@ jobs:
                       require(wrong_surf.get("ok") is False, f"{locale}: non-dialog surface confirm must be rejected")
                       flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
                       require(flush_res.get("ok") is True, f"{locale} dialog_flush_confirm failed: {flush_res}")
+                      require(backdrop_state["enabled"] is True and storage["config"]["bg_enabled"] is True,
+                              f"{locale}: flushing note markers changed the backdrop setting")
                       replay_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
                       require(replay_res.get("ok") is False, f"{locale}: duplicate confirm replay must be rejected")
                       # Regression: all CommonMark protected containers + U+2028 MUST survive flush byte-for-byte.

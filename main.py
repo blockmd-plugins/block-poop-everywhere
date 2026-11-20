@@ -183,8 +183,6 @@ STRINGS = {
         "act_save": "保存设置",
         "act_demo_toast": "试看四类提示",
         "act_rescan": "重新扫描笔记",
-        "act_toggle_bg": "切换背景",
-        "act_apply_bg": "立即应用背景",
         "act_reset_bg": "恢复默认背景",
         "act_keep": "先留着",
         "act_confirm_flush": "确认冲掉",
@@ -267,9 +265,6 @@ STRINGS = {
         "toast_dropped_note": "拉好了，已向 {note} 写入 {n} 坨",
         "toast_wrapped_sel": "已把选中的内容变成屎",
         "toast_no_selection": "当前没有选中文字，已改为在光标处拉一坨",
-        "toast_bg_on": "编辑区背景已拉满",
-        "toast_bg_off": "编辑区背景已收回",
-        "toast_bg_applied": "已应用编辑区矢量背景",
         "toast_bg_reset": "已恢复默认背景配置",
         "toast_heavy_warn": "{note} 已经堆了 {n} 坨，悠着点",
         "toast_blocked_nb": "当前笔记本未在允许列表里，已跳过",
@@ -317,10 +312,8 @@ STRINGS = {
         "log_status_clean": "已冲",
         "log_status_info": "联动",
         "click_to_open": "点击打开 {note}",
-        "dialog_desc_before": "当前笔记本共 {n} 坨，涉及 {notes} 篇笔记\n背景状态：{bg}",
+        "dialog_desc_before": "当前笔记本共 {n} 坨，涉及 {notes} 篇笔记",
         "dialog_desc_after": "正文标记精确清除，其余内容原封不动\n侧栏角标与面板统计归零",
-        "bg_state_on": "开启",
-        "bg_state_off": "关闭",
         "progress_flush": "冲水中",
         "err_unknown_action": "未知操作：{action}",
         "err_unknown_command": "未知命令：{cmd}",
@@ -343,8 +336,6 @@ STRINGS = {
         "act_save": "Save Settings",
         "act_demo_toast": "Preview 4 Toasts",
         "act_rescan": "Rescan Notes",
-        "act_toggle_bg": "Backdrop",
-        "act_apply_bg": "Apply Backdrop",
         "act_reset_bg": "Reset Backdrop",
         "act_keep": "Keep for Now",
         "act_confirm_flush": "Confirm Flush",
@@ -427,9 +418,6 @@ STRINGS = {
         "toast_dropped_note": "Wrote {n} drop mark(s) into {note}",
         "toast_wrapped_sel": "Turned selection into a poop callout",
         "toast_no_selection": "No selection found; dropped one at cursor instead",
-        "toast_bg_on": "Editor backdrop filled with poop motifs",
-        "toast_bg_off": "Editor backdrop cleared",
-        "toast_bg_applied": "Applied editor vector backdrop",
         "toast_bg_reset": "Reset backdrop to defaults",
         "toast_heavy_warn": "{note} already has {n} drops. Easy there.",
         "toast_blocked_nb": "Active notebook is not in the allowlist; skipped",
@@ -477,10 +465,8 @@ STRINGS = {
         "log_status_clean": "Flush",
         "log_status_info": "Sync",
         "click_to_open": "Click to open {note}",
-        "dialog_desc_before": "{n} drop(s) across {notes} note(s)\nBackdrop: {bg}",
+        "dialog_desc_before": "{n} drop(s) across {notes} note(s)",
         "dialog_desc_after": "Only plugin marker lines removed; user text untouched\nSidebar badges and board counters reset to zero",
-        "bg_state_on": "On",
-        "bg_state_off": "Off",
         "progress_flush": "Flushing",
         "err_unknown_action": "Unknown action: {action}",
         "err_unknown_command": "Unknown command: {cmd}",
@@ -2043,10 +2029,6 @@ class PoopEverywherePlugin:
             "id": "poop-panel",
             "badge": badge_str,
         })
-        self.best_effort_call(bridge, "host.titlebar.set_button", {
-            "id": "drop-here",
-            "active": bool(self.config["bg_enabled"]),
-        })
 
         # 3. Bottom status bar with icon
         if total > 0:
@@ -2330,9 +2312,6 @@ class PoopEverywherePlugin:
         conflicts = sorted(conflict_paths)
         failed_count = len(failed_paths)
         incomplete = bool(conflicts or failed_count > 0)
-        if not incomplete and self.config["bg_enabled"]:
-            self.config["bg_enabled"] = False
-            self.save_config(bridge)
         if total_removed > 0:
             self.state["total_flushed"] += total_removed
             self.append_log("flush_all", count=total_removed, tone="warning" if incomplete else "info")
@@ -2534,6 +2513,7 @@ class PoopEverywherePlugin:
             return False
         changed = False
         bg_changed = False
+        is_settings = surface in (SURFACE_SETTINGS, SURFACE_APPEARANCE)
         prev_bg_enabled = self.config["bg_enabled"]
 
         for key, allowed in (
@@ -2545,19 +2525,22 @@ class PoopEverywherePlugin:
             ("bg_tint", TINTS),
             ("preview_mode", PREVIEW_MODES),
         ):
+            is_background = key.startswith("bg_")
+            if is_background and not is_settings:
+                continue
             val = values.get(key)
             if isinstance(val, str) and val in allowed and self.config[key] != val:
                 self.config[key] = val
                 changed = True
-                if key.startswith("bg_"):
-                    bg_changed = True
+                bg_changed |= is_background
 
-        for key in ("bg_enabled", "bg_dark_glow"):
-            val = values.get(key)
-            if isinstance(val, bool) and self.config[key] != val:
-                self.config[key] = val
-                changed = True
-                bg_changed = True
+        if is_settings:
+            for key in ("bg_enabled", "bg_dark_glow"):
+                val = values.get(key)
+                if isinstance(val, bool) and self.config[key] != val:
+                    self.config[key] = val
+                    changed = True
+                    bg_changed = True
 
         if isinstance(values.get("caption"), str) and values["caption"][:60] != self.config["caption"]:
             self.config["caption"] = values["caption"][:60]
@@ -2919,7 +2902,6 @@ class PoopEverywherePlugin:
                         {
                             "kind": "actions",
                             "buttons": [
-                                {"id": "apply_backdrop", "label": t["act_apply_bg"], "variant": "primary"},
                                 {"id": "reset_backdrop", "label": t["act_reset_bg"], "variant": "secondary"},
                             ],
                         },
@@ -2962,12 +2944,6 @@ class PoopEverywherePlugin:
                                 {"label": t["m_active"], "value": t["m_unit_drop"].format(n=total), "tone": "ai_sessions"},
                                 {"label": t["m_notes"], "value": t["m_unit_note"].format(n=notes), "tone": "notes"},
                             ],
-                        },
-                        {
-                            "kind": "switch",
-                            "id": "bg_enabled",
-                            "label": t["lbl_bg_enabled"],
-                            "value": self.config["bg_enabled"],
                         },
                     ],
                 },
@@ -3026,7 +3002,6 @@ class PoopEverywherePlugin:
                             "kind": "actions",
                             "buttons": [
                                 {"id": "sidebar_drop", "label": t["act_drop_now"], "variant": "primary"},
-                                {"id": "sidebar_toggle_bg", "label": t["act_toggle_bg"], "variant": "secondary"},
                             ],
                         },
                     ],
@@ -3037,7 +3012,6 @@ class PoopEverywherePlugin:
     def render_flush_dialog(self):
         t = self.t()
         total, notes = self.active_counts_summary()
-        bg_state = t["bg_state_on"] if self.config["bg_enabled"] else t["bg_state_off"]
         items = [
             {
                 "kind": "metrics",
@@ -3053,7 +3027,7 @@ class PoopEverywherePlugin:
                     "palette": "warm",
                     "title": t["pv_diff_title"],
                     "badge": t["pv_badge"],
-                    "before": t["dialog_desc_before"].format(n=total, notes=notes, bg=bg_state),
+                    "before": t["dialog_desc_before"].format(n=total, notes=notes),
                     "after": t["dialog_desc_after"],
                 },
             },
@@ -3291,30 +3265,7 @@ class PoopEverywherePlugin:
             self.refresh_other_surfaces(bridge, surface)
             return {"ok": ok, "tone": tone, "status": msg, "page": self.render_surface(bridge, surface)}
 
-        if action_id == "sidebar_toggle_bg":
-            self.config["bg_enabled"] = not self.config["bg_enabled"]
-            self.save_config(bridge)
-            self.state["bg_toggles"] += 1
-            self.append_log("bg_on" if self.config["bg_enabled"] else "bg_off", tone="info")
-            self.save_state(bridge)
-            self.sync_host_ui(bridge)
-            self.refresh_other_surfaces(bridge, surface)
-            msg = t["toast_bg_on"] if self.config["bg_enabled"] else t["toast_bg_off"]
-            return {"ok": True, "tone": "info", "status": msg, "page": self.render_surface(bridge, surface)}
-
-        if action_id == "apply_backdrop":
-            self.save_config(bridge)
-            self.sync_host_ui(bridge)
-            self.refresh_other_surfaces(bridge, surface)
-            return {
-                "ok": True,
-                "tone": "success",
-                "status": t["toast_bg_applied"],
-                "page": self.render_surface(bridge, surface),
-                "values": page_values_for(surface, self.config),
-            }
-
-        if action_id == "reset_backdrop":
+        if surface == SURFACE_APPEARANCE and action_id == "reset_backdrop":
             for key in ("bg_enabled", "bg_backdrop", "bg_pattern", "bg_density", "bg_tint", "bg_dark_glow"):
                 self.config[key] = DEFAULT_CONFIG[key]
             self.save_config(bridge)
@@ -3383,17 +3334,6 @@ class PoopEverywherePlugin:
                 return {"ok": False, "tone": "warning", "status": t["toast_panel_unavailable"], "show_plugin_icon": True}
             self.sync_host_ui(bridge)
             return {"ok": True}
-
-        if cmd_id == "toggle_backdrop":
-            self.config["bg_enabled"] = not self.config["bg_enabled"]
-            self.save_config(bridge)
-            self.state["bg_toggles"] += 1
-            self.append_log("bg_on" if self.config["bg_enabled"] else "bg_off", tone="info")
-            self.save_state(bridge)
-            self.sync_host_ui(bridge)
-            self.refresh_other_surfaces(bridge)
-            msg = t["toast_bg_on"] if self.config["bg_enabled"] else t["toast_bg_off"]
-            return {"ok": True, "tone": "info", "status": msg, "show_plugin_icon": True}
 
         if cmd_id == "drop_in_note":
             strict = source == "sidebar_menu"
@@ -3497,8 +3437,6 @@ def page_values_for(surface, cfg):
             "bg_tint": cfg["bg_tint"],
             "bg_dark_glow": cfg["bg_dark_glow"],
         }
-    if surface == SURFACE_PANEL:
-        return {"bg_enabled": cfg["bg_enabled"]}
     return {}
 
 
