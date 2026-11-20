@@ -454,11 +454,17 @@ jobs:
                       rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
                       before_wrap = notes["WrapTarget.md"]
                       res_wrap = rpc("plugin.command", {"command_id": "poopify_selection", "context": {"note": "WrapTarget.md", "selection": "first\n\nsecond", "source": "editor_menu"}})
-                      require(res_wrap.get("ok") is True and "[poop:wrap-start]" in notes["WrapTarget.md"] and "[poop:wrap-end]" in notes["WrapTarget.md"],
+                      require(res_wrap.get("ok") is True and "block-poop-everywhere:drop:wrap-start" in notes["WrapTarget.md"] and "block-poop-everywhere:drop:wrap-end" in notes["WrapTarget.md"],
                               f"{locale}: poopify_selection did not emit lossless wrap markers")
+                      require("[poop:" not in notes["WrapTarget.md"], f"{locale}: drop output should not leak raw [poop:*] tags")
                       res_unwrap = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
                       require(res_unwrap.get("ok") is True and notes["WrapTarget.md"] == before_wrap,
                               f"{locale}: wrap->flush round-trip altered user text: {notes['WrapTarget.md']!r} != {before_wrap!r}")
+                      # Regression: legacy [poop:classic] markers from v1.0.0/v1.0.1 are still cleanly flushed.
+                      notes["A.md"] = "# Normal Note\n\n> [poop:classic] legacy drop <!-- block-poop-everywhere:drop -->\n"
+                      res_leg = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "A.md", "source": "sidebar_menu"}})
+                      require(res_leg.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"] and notes["A.md"] == "# Normal Note\n",
+                              f"{locale}: legacy drop flush failed: {notes['A.md']!r}")
                       # Regression: sidebar_menu preserves leading space and never touches wrong note or falls back.
                       res_space = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": " A.md", "source": "sidebar_menu"}})
                       require(res_space.get("ok") is True, f"{locale}: sidebar drop on ' A.md' failed")
