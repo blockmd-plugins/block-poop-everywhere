@@ -10,12 +10,14 @@
 - **All 14 Declarative UI Controls**: The plugin settings page showcases `segmented`, `switch`, `select`, `input`, `secret`, `folder`, `checklist`, `actions`, `metrics`, `treemap`, `kv`, `preview` (all 4 variants: `article`, `diff`, `cards`, `plan`), `log_list`, and `group` with instant `visible_when` rules and collapsible cards.
 - **Zero Emoji, Zero Dependencies, Safely Reversible**: Written in pure Python standard library using Ocean Paper dual-tone SVG paths. Every note marker carries an owned HTML signature tag and skips fenced/indented code, raw HTML blocks, and list containers. Wrapped selections unwrap byte-for-byte intact alongside optimistic concurrency (`expected_revision`) so flushing removes only plugin-authored lines without touching user prose or code examples.
 
+Adjust the editor backdrop in Settings > Appearance > Poop Everywhere Backdrop or on the plugin’s settings page. Saved preferences load at startup, and changes apply immediately.
+
 ## Extension Point Map
 
 | Surface | Manifest / RPC Entry | Permission |
 | --- | --- | --- |
 | Titlebar buttons & live badges | `contributes.titlebar_buttons` + `host.titlebar.set_button` | `ui:titlebar` |
-| Command palette & shortcuts | `contributes.commands` (`Cmd+Alt+P` / `K` / `B`) | `ui:commands` |
+| Command palette & shortcuts | `contributes.commands` (`Cmd+Alt+P` / `K`) | `ui:commands` |
 | Page action menu | `contributes.page_menu` | `ui:commands` |
 | Editor context menu | `contributes.editor_menu` (native dual-tone icons) | `ui:commands` |
 | Sidebar tree context menu | `contributes.sidebar_menu` | `ui:sidebar` |
