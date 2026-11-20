@@ -26,7 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.8"
+PLUGIN_VERSION = "1.0.9"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -728,14 +728,29 @@ def _line_interrupts_para_text(line):
     return _line_interrupts_bq_paragraph(line, cols)
 
 
-def _parse_link_ref_def(text_lines, start_idx):
+def _parse_link_ref_def(text_lines, start_idx, bq_mode=False):
     """If text_lines[start_idx:] begins a CommonMark §4.7 link reference definition,
     return the number of lines consumed (>= 1). Otherwise return 0.
+    When bq_mode is True, strip one leading '>' layer per accessed line lazily (O(consumed)).
     """
     n_lines = len(text_lines)
     if start_idx >= n_lines:
         return 0
-    first = text_lines[start_idx]
+    bq_cache = {}
+
+    def get_line(li_idx):
+        if not bq_mode:
+            return text_lines[li_idx]
+        cached = bq_cache.get(li_idx)
+        if cached is not None:
+            return cached
+        s = text_lines[li_idx]
+        inn, _ = strip_single_bq_prefix(s, 0)
+        cand = inn if inn is not None else s
+        bq_cache[li_idx] = cand
+        return cand
+
+    first = get_line(start_idx)
     cols, idx = leading_columns(first, 0)
     if cols > 3 or idx >= len(first) or first[idx] != "[":
         return 0
@@ -745,7 +760,7 @@ def _parse_link_ref_def(text_lines, start_idx):
             return False
         if li_idx == start_idx:
             return True
-        return not _line_interrupts_para_text(text_lines[li_idx])
+        return not _line_interrupts_para_text(get_line(li_idx))
 
     # 1. Link label: '[' + 1..999 chars (at least one non-ws), no unescaped '[' or ']'.
     li = start_idx
@@ -754,7 +769,7 @@ def _parse_link_ref_def(text_lines, start_idx):
     has_non_ws = False
     found_close = False
     while line_ok(li):
-        ln = text_lines[li]
+        ln = get_line(li)
         ln_len = len(ln)
         while ci < ln_len:
             ch = ln[ci]
@@ -787,7 +802,7 @@ def _parse_link_ref_def(text_lines, start_idx):
 
     if not found_close or not has_non_ws:
         return 0
-    ln = text_lines[li]
+    ln = get_line(li)
     if ci >= len(ln) or ln[ci] != ":":
         return 0
     ci += 1
@@ -799,7 +814,7 @@ def _parse_link_ref_def(text_lines, start_idx):
         li += 1
         if not line_ok(li):
             return 0
-        ln = text_lines[li]
+        ln = get_line(li)
         ci = 0
         while ci < len(ln) and ln[ci] in (" ", "\t"):
             ci += 1
@@ -850,7 +865,7 @@ def _parse_link_ref_def(text_lines, start_idx):
     dest_line_idx = li
 
     def parse_title(t_li, t_ci):
-        t_ln = text_lines[t_li]
+        t_ln = get_line(t_li)
         if t_ci >= len(t_ln):
             return 0
         opener = t_ln[t_ci]
@@ -867,7 +882,7 @@ def _parse_link_ref_def(text_lines, start_idx):
         while cur_li < n_lines:
             if cur_li > t_li and not line_ok(cur_li):
                 return 0
-            cur_ln = text_lines[cur_li]
+            cur_ln = get_line(cur_li)
             cur_len = len(cur_ln)
             while t_ci < cur_len:
                 ch = cur_ln[t_ci]
@@ -901,7 +916,7 @@ def _parse_link_ref_def(text_lines, start_idx):
     base_consumed = (dest_line_idx + 1) - start_idx
     next_li = dest_line_idx + 1
     if line_ok(next_li):
-        next_ln = text_lines[next_li]
+        next_ln = get_line(next_li)
         nci = 0
         while nci < len(next_ln) and next_ln[nci] in (" ", "\t"):
             nci += 1
@@ -945,8 +960,6 @@ def _nested_line_opens_or_continues_para(text, start_col, prev_in_para):
             return False
         if prev_in_para and SETEXT_UNDERLINE_RE.match(norm):
             return False
-        if not prev_in_para and text[idx] == "[" and _parse_link_ref_def([norm], 0) > 0:
-            return False
         inner_bq, inner_col = strip_single_bq_prefix(text, start_col)
         if inner_bq is not None:
             return _nested_line_opens_or_continues_para(inner_bq, inner_col, False)
@@ -970,10 +983,117 @@ def _strip_exact_bq_layers(text, start_col, depth):
     return cur, col
 
 
-def _commonmark_code_span_ranges(para_text):
-    """Return list of (start, end) character ranges of CommonMark §6.1 inline code spans."""
+def _try_parse_inline_link_tail(s, pos, unclosed_title):
+    """Parse CommonMark §6.3 inline link '(dest [title])' starting right after '('.
+    Returns index of matching ')' or -1 if invalid.
+    """
+    n = len(s)
+    p = pos
+    while p < n and s[p] in (" ", "\t", "\n"):
+        p += 1
+    if p >= n:
+        return -1
+    if s[p] == ")":
+        return p
+    # Destination: <...> (single line, no unescaped '<') or balanced-parens bare dest.
+    if s[p] == "<":
+        p += 1
+        closed = False
+        while p < n:
+            ch = s[p]
+            if ch == "\\" and p + 1 < n and s[p + 1] != "\n":
+                p += 2
+                continue
+            if ch in ("<", "\n"):
+                return -1
+            if ch == ">":
+                closed = True
+                p += 1
+                break
+            p += 1
+        if not closed:
+            return -1
+    else:
+        dest_start = p
+        paren_depth = 0
+        while p < n:
+            ch = s[p]
+            oc = ord(ch)
+            if oc <= 0x20 or oc == 0x7F:
+                break
+            if ch == "\\" and p + 1 < n:
+                p += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return -1
+            elif ch == ")":
+                if paren_depth == 0:
+                    break
+                paren_depth -= 1
+            p += 1
+        if p == dest_start or paren_depth != 0:
+            return -1
+    ws_start = p
+    while p < n and s[p] in (" ", "\t", "\n"):
+        p += 1
+    if p >= n:
+        return -1
+    if s[p] == ")":
+        return p
+    if p == ws_start or s[p] not in ('"', "'", "("):
+        return -1
+    opener = s[p]
+    closer = ")" if opener == "(" else opener
+    fail_floor = unclosed_title.get(closer)
+    if fail_floor is not None and p >= fail_floor:
+        return -1
+    title_start = p
+    p += 1
+    closed_title = False
+    while p < n:
+        ch = s[p]
+        if ch == "\\" and p + 1 < n:
+            p += 2
+            continue
+        if opener == "(" and ch == "(":
+            return -1
+        if ch == closer:
+            closed_title = True
+            p += 1
+            break
+        p += 1
+    if not closed_title:
+        unclosed_title[closer] = title_start
+        return -1
+    while p < n and s[p] in (" ", "\t", "\n"):
+        p += 1
+    if p < n and s[p] == ")":
+        return p
+    return -1
+
+
+def _commonmark_protected_inline_ranges(para_text):
+    """Return list of (start, end) ranges for CommonMark §6.1 code spans and
+    §6.3 inline link/image destination+title tails in O(N) time."""
     ranges = []
     n = len(para_text)
+    tick_runs = {}
+    tick_cursor = {}
+    if "`" in para_text:
+        k = 0
+        while k < n:
+            if para_text[k] == "`":
+                r = 1
+                while k + r < n and para_text[k + r] == "`":
+                    r += 1
+                tick_runs.setdefault(r, []).append(k)
+                k += r
+            else:
+                k += 1
+    unclosed_title = {}
+    open_brackets = 0
     i = 0
     while i < n:
         ch = para_text[i]
@@ -981,26 +1101,36 @@ def _commonmark_code_span_ranges(para_text):
             i += 2
             continue
         if ch == "`":
-            ticks = 0
+            ticks = 1
             while i + ticks < n and para_text[i + ticks] == "`":
                 ticks += 1
-            j = i + ticks
-            closed = False
-            while j < n:
-                if para_text[j] == "`":
-                    run = 0
-                    while j + run < n and para_text[j + run] == "`":
-                        run += 1
-                    if run == ticks:
-                        ranges.append((i, j + run))
-                        i = j + run
-                        closed = True
-                        break
-                    j += run
-                    continue
-                j += 1
-            if not closed:
+            positions = tick_runs.get(ticks, ())
+            cur = tick_cursor.get(ticks, 0)
+            while cur < len(positions) and positions[cur] <= i:
+                cur += 1
+            tick_cursor[ticks] = cur
+            if cur < len(positions):
+                close_pos = positions[cur]
+                ranges.append((i, close_pos + ticks))
+                i = close_pos + ticks
+            else:
                 i += ticks
+            continue
+        if ch == "[":
+            open_brackets += 1
+            i += 1
+            continue
+        if ch == "]":
+            if open_brackets > 0:
+                if i + 1 < n and para_text[i + 1] == "(":
+                    close_paren = _try_parse_inline_link_tail(para_text, i + 2, unclosed_title)
+                    if close_paren >= 0:
+                        ranges.append((i + 1, close_paren + 1))
+                        open_brackets -= 1
+                        i = close_paren + 1
+                        continue
+                open_brackets -= 1
+            i += 1
             continue
         i += 1
     return ranges
@@ -1024,8 +1154,8 @@ def _comment_in_code_span(line_offset, inner_text, span_ranges):
     return False
 
 
-def iter_markdown_lines(content):
-    """Yield (raw_line, eligible_for_top_level_drop) with CommonMark container tracking."""
+def _iter_markdown_records(content):
+    """Yield (raw_line, eligible_for_top_level_drop, lazy_nested) with CommonMark container tracking."""
     raw_lines = split_md_lines(content)
     stripped_lines = []
     for idx_s, rl in enumerate(raw_lines):
@@ -1034,26 +1164,13 @@ def iter_markdown_lines(content):
             sn = sn[1:]
         stripped_lines.append(sn)
 
-    def collect_bq_ref_lines(start_i):
-        out = []
-        n_all = len(stripped_lines)
-        k = start_i
-        while k < n_all:
-            s = stripped_lines[k]
-            inn, _ = strip_single_bq_prefix(s, 0)
-            cand = inn if inn is not None else s
-            if k > start_i and _line_interrupts_para_text(cand):
-                break
-            out.append(cand)
-            k += 1
-        return out
-
     in_fence = False
     fence_char = ""
     fence_len = 0
     fence_list_indent = None
     in_indented = False
     html_kind = None
+    html_list_indent = None
     in_paragraph = False
     skip_ref_def_lines = 0
     # List container stack: list of minimum content column offsets
@@ -1064,6 +1181,7 @@ def iter_markdown_lines(content):
     bq_fence_len = 0
     bq_fence_list_indent = None
     bq_html_kind = None
+    bq_html_list_indent = None
     bq_in_paragraph = False
     bq_in_nested_para = False
     bq_in_indented = False
@@ -1081,9 +1199,8 @@ def iter_markdown_lines(content):
         bq_nested_html_kind = None
         bq_nested_depth = 0
 
-    # Collect (raw_line, eligible, para_chunk_or_None, is_bq_para_line) so a second pass
-    # can accurately protect single- and multi-line CommonMark §6.1 inline code spans
-    # inside blockquote paragraphs (including lazy continuation closing backticks).
+    # Collect [raw_line, eligible, para_chunk_or_None, is_bq_para_line, lazy_nested] so Pass 2
+    # can protect single- and multi-line CommonMark §6.1 code spans and §6.3 inline link tails.
     records = []
 
     for line_idx, raw_line in enumerate(raw_lines):
@@ -1095,14 +1212,14 @@ def iter_markdown_lines(content):
         if skip_ref_def_lines > 0:
             skip_ref_def_lines -= 1
             in_paragraph = False
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             continue
         if bq_skip_ref_def_lines > 0:
             bq_skip_ref_def_lines -= 1
             bq_in_paragraph = False
             bq_in_nested_para = False
             in_paragraph = False
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             continue
 
         # 1. Active fenced code block (top-level or list-nested)
@@ -1113,7 +1230,7 @@ def iter_markdown_lines(content):
                 fence_len = 0
                 fence_list_indent = None
             else:
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 max_close_col = 3 if fence_list_indent is None else fence_list_indent + 3
                 if not is_blank and cols <= max_close_col:
                     m_close = re.match(r"^(`{3,}|~{3,})[ \t]*$", stripped_nl[idx:])
@@ -1125,18 +1242,24 @@ def iter_markdown_lines(content):
                 in_paragraph = False
                 continue
 
-        # 2. Active top-level HTML block
+        # 2. Active top-level or list-nested HTML block
         if html_kind is not None:
-            if html_kind == "blank" and is_blank:
+            if html_list_indent is not None and not is_blank and cols < html_list_indent:
                 html_kind = None
+                html_list_indent = None
+            else:
+                if html_kind == "blank" and is_blank:
+                    html_kind = None
+                    html_list_indent = None
+                    in_paragraph = False
+                    records.append([raw_line, False, None, False, False])
+                    continue
+                records.append([raw_line, False, None, False, False])
+                if html_block_closes(html_kind, stripped_nl):
+                    html_kind = None
+                    html_list_indent = None
                 in_paragraph = False
-                records.append([raw_line, False, None, False])
                 continue
-            records.append([raw_line, False, None, False])
-            if html_block_closes(html_kind, stripped_nl):
-                html_kind = None
-            in_paragraph = False
-            continue
 
         # Handle lines without a leading '>' prefix: either lazy continuation of an
         # open blockquote paragraph (CommonMark §5.1) or blockquote termination.
@@ -1144,15 +1267,16 @@ def iter_markdown_lines(content):
         if bq_inner is None:
             if (bq_in_paragraph or bq_in_nested_para) and not _line_interrupts_bq_paragraph(stripped_nl, cols):
                 if bq_in_nested_para:
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                 else:
-                    records.append([raw_line, False, stripped_nl, True])
+                    records.append([raw_line, False, stripped_nl, True, False])
                 in_paragraph = False
                 continue
             bq_fence_char = ""
             bq_fence_len = 0
             bq_fence_list_indent = None
             bq_html_kind = None
+            bq_html_list_indent = None
             bq_in_paragraph = False
             bq_in_nested_para = False
             bq_in_indented = False
@@ -1161,7 +1285,7 @@ def iter_markdown_lines(content):
 
         # 3. Blank line
         if is_blank:
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             in_paragraph = False
             list_in_para = False
             continue
@@ -1170,7 +1294,7 @@ def iter_markdown_lines(content):
         # while respecting CommonMark §5.2 lazy paragraph continuation)
         if list_indents:
             if cols < list_indents[-1] and list_in_para and bq_inner is None and not _line_interrupts_bq_paragraph(stripped_nl, cols):
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 in_paragraph = False
                 continue
             while list_indents and cols < list_indents[-1]:
@@ -1181,6 +1305,7 @@ def iter_markdown_lines(content):
                 rel_cols = cols - list_indents[-1]
                 rel_text = (" " * rel_cols) + stripped_nl[idx:]
                 opened_fence = False
+                opened_html = False
                 if rel_cols <= 3:
                     m_lf = FENCE_OPEN_RE.match(rel_text)
                     if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
@@ -1189,15 +1314,22 @@ def iter_markdown_lines(content):
                         fence_len = len(m_lf.group(1))
                         fence_list_indent = list_indents[-1]
                         opened_fence = True
-                list_in_para = False if opened_fence else _nested_line_opens_or_continues_para(rel_text, 0, list_in_para)
-                records.append([raw_line, False, None, False])
+                    else:
+                        hk_l = html_block_end_kind(rel_text, allow_type7=not list_in_para)
+                        if hk_l is not None:
+                            if not html_block_closes(hk_l, rel_text):
+                                html_kind = hk_l
+                                html_list_indent = list_indents[-1]
+                            opened_html = True
+                list_in_para = False if (opened_fence or opened_html) else _nested_line_opens_or_continues_para(rel_text, 0, list_in_para)
+                records.append([raw_line, False, None, False, False])
                 in_paragraph = False
                 continue
 
         # 5. Active or newly starting top-level indented code block (CommonMark §4.4: cannot interrupt paragraph)
         if in_indented:
             if cols >= 4:
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 in_paragraph = False
                 continue
             in_indented = False
@@ -1205,7 +1337,7 @@ def iter_markdown_lines(content):
         if (not in_paragraph) and cols >= 4:
             in_indented = True
             in_paragraph = False
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             continue
 
         # 6. Top-level fenced code block open
@@ -1220,15 +1352,16 @@ def iter_markdown_lines(content):
                     fence_len = len(marker)
                     fence_list_indent = None
                     in_paragraph = False
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     continue
 
         # 7. Top-level raw HTML block open (CommonMark §4.6 types 1-7: type 7 cannot interrupt paragraph)
         hk = html_block_end_kind(stripped_nl, allow_type7=not in_paragraph)
         if hk is not None:
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             if not html_block_closes(hk, stripped_nl):
                 html_kind = hk
+                html_list_indent = None
             in_paragraph = False
             continue
 
@@ -1239,7 +1372,7 @@ def iter_markdown_lines(content):
             or THEMATIC_BREAK_RE.match(stripped_nl)
         ):
             in_paragraph = False
-            records.append([raw_line, False, None, False])
+            records.append([raw_line, False, None, False, False])
             continue
 
         if (not in_paragraph) and cols <= 3 and idx < len(stripped_nl) and stripped_nl[idx] == "[":
@@ -1247,7 +1380,7 @@ def iter_markdown_lines(content):
             if ref_lines > 0:
                 skip_ref_def_lines = ref_lines - 1
                 in_paragraph = False
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 continue
 
         # 8. List item open (bullet or ordered) — respecting CommonMark §5.2 paragraph interruption
@@ -1257,6 +1390,7 @@ def iter_markdown_lines(content):
             body, body_col = _list_item_body(stripped_nl, 0, m_list)
             b_cols_l, _ = leading_columns(body, body_col)
             opened_fence = False
+            opened_html = False
             if b_cols_l <= 3:
                 m_lf = FENCE_OPEN_RE.match(body)
                 if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
@@ -1265,8 +1399,15 @@ def iter_markdown_lines(content):
                     fence_len = len(m_lf.group(1))
                     fence_list_indent = list_indents[-1]
                     opened_fence = True
-            list_in_para = False if opened_fence else _nested_line_opens_or_continues_para(body, body_col, False)
-            records.append([raw_line, False, None, False])
+                else:
+                    hk_l = html_block_end_kind(body, allow_type7=True)
+                    if hk_l is not None:
+                        if not html_block_closes(hk_l, body):
+                            html_kind = hk_l
+                            html_list_indent = list_indents[-1]
+                        opened_html = True
+            list_in_para = False if (opened_fence or opened_html) else _nested_line_opens_or_continues_para(body, body_col, False)
+            records.append([raw_line, False, None, False, False])
             in_paragraph = False
             continue
 
@@ -1284,7 +1425,7 @@ def iter_markdown_lines(content):
                     bq_fence_len = 0
                     bq_fence_list_indent = None
                 else:
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bmax_close = 3 if bq_fence_list_indent is None else bq_fence_list_indent + 3
                     if not inner_blank and bcols <= bmax_close:
                         m_bc = re.match(r"^(`{3,}|~{3,})[ \t]*$", bq_inner[bidx:])
@@ -1296,20 +1437,26 @@ def iter_markdown_lines(content):
                     bq_in_nested_para = False
                     continue
 
-            # 9b. Active blockquote-nested HTML block
+            # 9b. Active blockquote-nested HTML block (direct or inside bq list)
             if bq_html_kind is not None:
                 reset_bq_nested_blocks()
-                if bq_html_kind == "blank" and inner_blank:
+                if bq_html_list_indent is not None and not inner_blank and bcols < bq_html_list_indent:
                     bq_html_kind = None
-                elif html_block_closes(bq_html_kind, bq_inner):
-                    bq_html_kind = None
-                records.append([raw_line, False, None, False])
-                bq_in_paragraph = False
-                bq_in_nested_para = False
-                continue
+                    bq_html_list_indent = None
+                else:
+                    if bq_html_kind == "blank" and inner_blank:
+                        bq_html_kind = None
+                        bq_html_list_indent = None
+                    elif html_block_closes(bq_html_kind, bq_inner):
+                        bq_html_kind = None
+                        bq_html_list_indent = None
+                    records.append([raw_line, False, None, False, False])
+                    bq_in_paragraph = False
+                    bq_in_nested_para = False
+                    continue
 
             if inner_blank:
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 bq_in_paragraph = False
                 bq_in_nested_para = False
                 reset_bq_nested_blocks()
@@ -1337,8 +1484,9 @@ def iter_markdown_lines(content):
                             if bhk_l is not None:
                                 if not html_block_closes(bhk_l, rel_btext):
                                     bq_html_kind = bhk_l
+                                    bq_html_list_indent = bq_list_indents[-1]
                                 opened_bhtml = True
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False if (opened_bfence or opened_bhtml) else _nested_line_opens_or_continues_para(rel_btext, 0, bq_in_nested_para)
                     continue
@@ -1347,7 +1495,7 @@ def iter_markdown_lines(content):
             if bq_in_indented:
                 reset_bq_nested_blocks()
                 if bcols >= 4:
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False
                     continue
@@ -1355,7 +1503,7 @@ def iter_markdown_lines(content):
             if (not bq_in_paragraph) and (not bq_in_nested_para) and bcols >= 4:
                 reset_bq_nested_blocks()
                 bq_in_indented = True
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 bq_in_paragraph = False
                 bq_in_nested_para = False
                 continue
@@ -1368,7 +1516,7 @@ def iter_markdown_lines(content):
                     bq_fence_char = m_bo.group(1)[0]
                     bq_fence_len = len(m_bo.group(1))
                     bq_fence_list_indent = None
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False
                     continue
@@ -1377,7 +1525,8 @@ def iter_markdown_lines(content):
                     reset_bq_nested_blocks()
                     if not html_block_closes(bhk, bq_inner):
                         bq_html_kind = bhk
-                    records.append([raw_line, False, None, False])
+                        bq_html_list_indent = None
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False
                     continue
@@ -1387,18 +1536,18 @@ def iter_markdown_lines(content):
                     or THEMATIC_BREAK_RE.match(bq_inner)
                 ):
                     reset_bq_nested_blocks()
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False
                     continue
                 if (not bq_in_paragraph) and (not bq_in_nested_para) and bidx < len(bq_inner) and bq_inner[bidx] == "[":
-                    bq_ref_lines = _parse_link_ref_def(collect_bq_ref_lines(line_idx), 0)
+                    bq_ref_lines = _parse_link_ref_def(stripped_lines, line_idx, bq_mode=True)
                     if bq_ref_lines > 0:
                         reset_bq_nested_blocks()
                         bq_skip_ref_def_lines = bq_ref_lines - 1
                         bq_in_paragraph = False
                         bq_in_nested_para = False
-                        records.append([raw_line, False, None, False])
+                        records.append([raw_line, False, None, False, False])
                         continue
                 m_blist = LIST_ITEM_RE.match(bq_inner)
                 if m_blist and ((not bq_in_paragraph and not bq_in_nested_para) or _can_list_interrupt_paragraph(m_blist, bq_inner)):
@@ -1420,8 +1569,9 @@ def iter_markdown_lines(content):
                             if bhk_l is not None:
                                 if not html_block_closes(bhk_l, b_body):
                                     bq_html_kind = bhk_l
+                                    bq_html_list_indent = bq_list_indents[-1]
                                 opened_bhtml = True
-                    records.append([raw_line, False, None, False])
+                    records.append([raw_line, False, None, False, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False if (opened_bfence or opened_bhtml) else _nested_line_opens_or_continues_para(b_body, b_body_col, False)
                     continue
@@ -1448,7 +1598,7 @@ def iter_markdown_lines(content):
                                 bq_nested_html_kind = None
                         bq_in_nested_para = False
                         bq_in_paragraph = False
-                        records.append([raw_line, False, None, False])
+                        records.append([raw_line, False, None, False, False])
                         continue
                     reset_bq_nested_blocks()
 
@@ -1485,23 +1635,23 @@ def iter_markdown_lines(content):
                     bq_in_nested_para = _nested_line_opens_or_continues_para(deep_inner, deep_col, prev_same_para)
                 bq_nested_depth = depth
                 bq_in_paragraph = False
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, False])
                 continue
 
             reset_bq_nested_blocks()
             if bq_in_nested_para:
                 # CommonMark §5.1 lazy continuation of nested blockquote or bq-list paragraph.
-                records.append([raw_line, False, None, False])
+                records.append([raw_line, False, None, False, True])
                 continue
 
             bq_in_paragraph = True
-            records.append([raw_line, bcols <= 3, bq_inner, True])
+            records.append([raw_line, bcols <= 3, bq_inner, True, False])
             continue
 
         in_paragraph = True
-        records.append([raw_line, False, stripped_nl, False])
+        records.append([raw_line, False, stripped_nl, False, False])
 
-    # Pass 2: Protect CommonMark §6.1 inline code spans (single-line and multi-line)
+    # Pass 2: Protect CommonMark §6.1 inline code spans and §6.3 inline link destination/title
     # within each contiguous blockquote paragraph (including trailing lazy continuation lines).
     n_rec = len(records)
     idx_rec = 0
@@ -1514,13 +1664,13 @@ def iter_markdown_lines(content):
             idx_rec += 1
         end_rec = idx_rec
         # Include immediately following top-level lazy paragraph continuation lines (no '>')
-        # so backtick spans closed on a lazy continuation line are recognized.
+        # so backtick spans or link titles closed on a lazy continuation line are recognized.
         while end_rec < n_rec and (not records[end_rec][3]) and records[end_rec][2] is not None:
             end_rec += 1
         chunks = [records[k][2] for k in range(start_rec, end_rec)]
         joined = "\n".join(chunks)
-        if "`" in joined:
-            span_ranges = _commonmark_code_span_ranges(joined)
+        if "`" in joined or "](" in joined:
+            span_ranges = _commonmark_protected_inline_ranges(joined)
             if span_ranges:
                 offset = 0
                 for k in range(start_rec, end_rec):
@@ -1531,7 +1681,13 @@ def iter_markdown_lines(content):
         idx_rec = end_rec
 
     for rec in records:
-        yield rec[0], rec[1]
+        yield rec[0], rec[1], rec[4]
+
+
+def iter_markdown_lines(content):
+    """Yield (raw_line, eligible_for_top_level_drop) with CommonMark container tracking."""
+    for raw_line, eligible, _ in _iter_markdown_records(content):
+        yield raw_line, eligible
 
 
 class PoopEverywherePlugin:
@@ -1723,12 +1879,29 @@ class PoopEverywherePlugin:
     def count_markers(self, content):
         if not isinstance(content, str):
             return 0
-        return sum(1 for line, eligible in iter_markdown_lines(content) if eligible and match_marker_line(line))
+        total = 0
+        in_wrap_legacy_same_bq = False
+        for line, eligible, lazy_nested in _iter_markdown_records(content):
+            if in_wrap_legacy_same_bq and strip_single_bq_prefix(line.rstrip("\r\n"), 0)[0] is None:
+                in_wrap_legacy_same_bq = False
+            if eligible or (in_wrap_legacy_same_bq and lazy_nested):
+                m = match_marker_line(line)
+                if m:
+                    is_legacy = m.group("kind") is None
+                    kind = m.group("kind") or m.group("legacy") or "classic"
+                    if (not eligible) and not (is_legacy and kind == "wrap-end"):
+                        continue
+                    if kind == "wrap-start":
+                        in_wrap_legacy_same_bq = is_legacy
+                    elif kind == "wrap-end":
+                        in_wrap_legacy_same_bq = False
+                    total += 1
+        return total
 
     def strip_markers(self, content):
         if not isinstance(content, str):
             return "", 0
-        items = list(iter_markdown_lines(content))
+        items = list(_iter_markdown_records(content))
         n_items = len(items)
 
         def is_bare_bq_sep(raw_line):
@@ -1739,7 +1912,7 @@ class PoopEverywherePlugin:
         def is_nonwrap_drop(idx_pos):
             if idx_pos >= n_items:
                 return False
-            raw, elig = items[idx_pos]
+            raw, elig, _ = items[idx_pos]
             if not elig:
                 return False
             mm = match_marker_line(raw)
@@ -1752,41 +1925,56 @@ class PoopEverywherePlugin:
         removed = 0
         in_wrap = False
         in_wrap_legacy = False
+        in_wrap_legacy_same_bq = False
         eat_next_blank = False
         prev_removed_drop = False
         pending_bq_sep = False
         pending_blank_sep = False
-        for i, (line, eligible) in enumerate(items):
+        for i, (line, eligible, lazy_nested) in enumerate(items):
+            if in_wrap_legacy_same_bq and strip_single_bq_prefix(line.rstrip("\r\n"), 0)[0] is None:
+                in_wrap_legacy_same_bq = False
             if eat_next_blank:
                 eat_next_blank = False
                 if line in ("\n", "\r\n", "\r") or is_bare_bq_sep(line):
                     continue
-            if eligible:
+            if eligible or (in_wrap_legacy_same_bq and lazy_nested):
                 m = match_marker_line(line)
                 if m:
                     is_legacy = m.group("kind") is None
                     kind = m.group("kind") or m.group("legacy") or "classic"
+                    if (not eligible) and not (is_legacy and kind == "wrap-end"):
+                        m = None
+                if m:
                     meta = m.group("meta") or ""
                     meta_flags = set(meta.split(",")) if meta else set()
                     if kind == "wrap-start":
                         in_wrap = True
                         in_wrap_legacy = is_legacy
+                        in_wrap_legacy_same_bq = is_legacy
                         eat_next_blank = not is_legacy
                         prev_removed_drop = False
                         pending_bq_sep = False
                         pending_blank_sep = False
                     elif kind == "wrap-end":
+                        eat_next_blank = False
                         if in_wrap:
                             if not in_wrap_legacy:
                                 if kept and (kept[-1] in ("\n", "\r\n", "\r") or is_bare_bq_sep(kept[-1])):
                                     kept.pop()
+                            elif (
+                                line.endswith(("\n", "\r"))
+                                and i + 1 == n_items - 1
+                                and items[i + 1][0] in ("\n", "\r\n", "\r")
+                            ):
+                                # Clean the single synthetic trailing blank line written by v1.0.2 wraps.
+                                eat_next_blank = True
                             if not line.endswith(("\n", "\r")) and kept and kept[-1].endswith("\n"):
                                 kept[-1] = kept[-1][:-1]
                                 if kept[-1] == "":
                                     kept.pop()
                         in_wrap = False
                         in_wrap_legacy = False
-                        eat_next_blank = False
+                        in_wrap_legacy_same_bq = False
                         prev_removed_drop = False
                         pending_bq_sep = False
                         pending_blank_sep = False
@@ -1948,7 +2136,8 @@ class PoopEverywherePlugin:
         fence_len = 0
         html_kind = None
         blank_run = 0
-        prev_was_bq = False
+        prev_was_any_bq = False
+        prev_para_bq_depth = 0
         saw_blank_after_bq = False
         for raw in lines:
             s = raw.rstrip("\n")
@@ -1960,7 +2149,8 @@ class PoopEverywherePlugin:
                     if mc and mc.group(1)[0] == fence_ch and len(mc.group(1)) >= fence_len:
                         in_fence = False
                 blank_run = 0
-                prev_was_bq = False
+                prev_was_any_bq = False
+                prev_para_bq_depth = 0
                 saw_blank_after_bq = False
                 continue
             if html_kind is not None:
@@ -1971,27 +2161,45 @@ class PoopEverywherePlugin:
                 if html_block_closes(html_kind, s):
                     html_kind = None
                 blank_run = 0
-                prev_was_bq = False
+                prev_was_any_bq = False
+                prev_para_bq_depth = 0
                 saw_blank_after_bq = False
                 continue
             if is_blank:
                 blank_run += 1
                 if blank_run >= 2:
                     return False
-                if prev_was_bq:
+                if prev_was_any_bq:
                     saw_blank_after_bq = True
                 continue
             blank_run = 0
-            cur_is_bq = strip_single_bq_prefix(s, 0)[0] is not None
-            if prev_was_bq and not saw_blank_after_bq and not cur_is_bq:
+            cur_bq_depth = 0
+            cur_rem = s
+            cur_col = 0
+            while True:
+                nxt, nxt_col = strip_single_bq_prefix(cur_rem, cur_col)
+                if nxt is None:
+                    break
+                cur_bq_depth += 1
+                cur_rem = nxt
+                cur_col = nxt_col
+            if cur_bq_depth > 0 and cur_rem.strip(" \t") == "":
+                if cur_bq_depth >= 2:
+                    return False
+                prev_was_any_bq = True
+                prev_para_bq_depth = 0
+                saw_blank_after_bq = False
+                continue
+            if prev_para_bq_depth > 0 and not saw_blank_after_bq and cur_bq_depth < prev_para_bq_depth:
                 # Block's parser does not support CommonMark lazy blockquote continuations
-                # ("> A\nlazy" splits into "> A\n\nlazy"), so wrapping cannot round-trip losslessly.
+                # ("> A\nlazy" or "> > A\n> B"), so wrapping cannot round-trip losslessly.
                 return False
-            if cur_is_bq and saw_blank_after_bq:
+            if cur_bq_depth > 0 and saw_blank_after_bq:
                 # Block's serializer merges consecutive separate blockquotes ("> A\n\n> B")
                 # into a single blockquote ("> A\n>\n> B"), so wrapping cannot round-trip losslessly.
                 return False
-            prev_was_bq = cur_is_bq
+            prev_was_any_bq = cur_bq_depth > 0
+            prev_para_bq_depth = cur_bq_depth
             saw_blank_after_bq = False
             if cols <= 3:
                 mo = FENCE_OPEN_RE.match(s)

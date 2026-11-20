@@ -716,6 +716,22 @@ jobs:
               _dt = _time.perf_counter() - _t0
               require(len(_big_lines) == 160_000 and _dt < 2.0, f"split_md_lines performance regression: {_dt:.2f}s")
 
+              # Regression: CommonMark v1.0.9 edge cases (nested refdef lazy cont, bq-list HTML close,
+              # inline link title protection, legacy v1.0.2 list wrap flush, nested bq wrap safety, O(N) bq refdefs).
+              _p = _mod.PoopEverywherePlugin()
+              _sig = "<!-- block-poop-everywhere:drop -->"
+              require(_p.count_markers(f"> > [r]: /u\n> example {_sig}\n") == 0, "nested refdef lazy cont must be protected")
+              require(_p.count_markers(f"> - <div>\n> drop {_sig}\n") == 1, "bq-list HTML block must close on dedent")
+              require(_p.count_markers(f'> [x](/url "caption\n> example {_sig}\n> tail")\n') == 0, "inline link title must be protected")
+              _lw3 = f"> [poop:wrap-start] cap {_sig}\n> - A\n> [poop:wrap-end] ··· {_sig}\n\n"
+              require(_p.count_markers(_lw3) == 2, "legacy v1.0.2 list wrap count mismatch")
+              _lw3_out, _lw3_rem = _p.strip_markers(_lw3)
+              require(_lw3_rem == 2 and _lw3_out == "> - A\n", f"legacy v1.0.2 list wrap flush mismatch: {_lw3_out!r}, {_lw3_rem}")
+              require(not _p.is_editor_wrap_safe("> > A\n> B"), "nested lazy bq depth drop must be refused")
+              _t1 = _time.perf_counter()
+              require(_p.count_markers("> [x]: /url\n" * 2000) == 0, "bq refdef batch count mismatch")
+              require(_time.perf_counter() - _t1 < 1.0, "bq refdef parsing regressed to O(N^2)")
+
               manifest_path = pkg_dir / "manifest.json"
               require(not os.path.islink(manifest_path) and manifest_path.is_file(), "Staged package missing manifest.json")
               manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
