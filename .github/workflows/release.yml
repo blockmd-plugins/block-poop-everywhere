@@ -242,6 +242,8 @@ jobs:
                   "> [poop:classic] custom html7 <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] heading html7 <!-- block-poop-everywhere:drop -->",
                   ">     > [poop:classic] bq heading indented <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] nested lazy cont <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] multiline code span <!-- block-poop-everywhere:drop -->",
               ]
               notes = {
                   NOTE_NAME: (
@@ -257,13 +259,18 @@ jobs:
                       "<custom>\n" + protected_samples[8] + "\n\n"
                       "# HeadingBeforeCustom\n<custom>\n" + protected_samples[9] + "\n\n"
                       "> # HeadingInsideBQ\n" + protected_samples[10] + "\n\n"
+                      "> > nested paragraph\n" + protected_samples[11] + "\n\n"
+                      "> example `start\n" + protected_samples[12] + "\n> end`\n\n"
                       "Hello Block.\n"
                   ),
+                  "BOMFence.md": "\ufeff```md\n> [poop:classic] bom fence <!-- block-poop-everywhere:drop -->\n```\n",
                   " A.md": "# Leading Space Note\n",
                   "A.md": "# Normal Note\n",
                   "Notes.MD": "# Uppercase Extension\n",
                   "Extra.markdown": "# Markdown Extension\n",
                   "NoEOL.md": "A",
+                  "OnlyLF.md": "\n",
+                  "MixedEOL.md": "A\n\r\n",
                   "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
               }
               storage = {}
@@ -558,9 +565,10 @@ jobs:
                       active_note_state["path"] = NOTE_NAME
                       require(no_active_flush.get("ok") is False and "block-poop-everywhere:drop" in notes[" A.md"],
                               f"{locale}: panel_flush_page modified unrelated note when active note was empty")
-                      # Regression: file append on note without trailing LF round-trips byte-for-byte on flush.
-                      no_eol_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": "NoEOL.md"}})
-                      require(no_eol_drop.get("ok") is True, f"{locale}: NoEOL.md sidebar drop failed: {no_eol_drop}")
+                      # Regression: file append on no-EOL, newline-only, and mixed-EOL notes round-trips byte-for-byte on flush.
+                      for special_note in ("NoEOL.md", "OnlyLF.md", "MixedEOL.md"):
+                          sp_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": special_note}})
+                          require(sp_drop.get("ok") is True, f"{locale}: {special_note} sidebar drop failed: {sp_drop}")
                       # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB) must be refused without mutating note.
                       for bad_sel in ("\nA\r", "A\n\n\n\nB"):
                           before_wrap = notes["WrapTarget.md"]
@@ -594,6 +602,9 @@ jobs:
                       for sample in protected_samples:
                           require(sample in notes[NOTE_NAME], f"{locale}: flush corrupted protected sample: {sample!r}")
                       require(notes["NoEOL.md"] == "A", f"{locale}: NoEOL.md did not round-trip byte-for-byte: {notes['NoEOL.md']!r}")
+                      require(notes["OnlyLF.md"] == "\n", f"{locale}: OnlyLF.md did not round-trip byte-for-byte: {notes['OnlyLF.md']!r}")
+                      require(notes["MixedEOL.md"] == "A\n\r\n", f"{locale}: MixedEOL.md did not round-trip byte-for-byte: {notes['MixedEOL.md']!r}")
+                      require("bom fence" in notes["BOMFence.md"], f"{locale}: flush corrupted UTF-8 BOM fenced code block")
                       require("block-poop-everywhere:drop" not in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["Notes.MD"],
                               f"{locale}: flush left top-level plugin markers behind")
                   require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
