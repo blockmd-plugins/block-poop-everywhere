@@ -237,6 +237,9 @@ jobs:
                   " \t> [poop:classic] tab indented <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] html block <!-- block-poop-everywhere:drop -->",
                   "LineBefore\u2028> [poop:classic] ls sep <!-- block-poop-everywhere:drop -->",
+                  ">   > [poop:classic] bq list fence <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] bq tab fence <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] custom html7 <!-- block-poop-everywhere:drop -->",
               ]
               notes = {
                   NOTE_NAME: (
@@ -247,6 +250,9 @@ jobs:
                       + protected_samples[3] + "\n\n"
                       "<pre>\n" + protected_samples[4] + "\n</pre>\n\n"
                       + protected_samples[5] + "\n\n"
+                      "> - ```md\n" + protected_samples[6] + "\n>   ```\n\n"
+                      ">\t ```md\n" + protected_samples[7] + "\n> ```\n\n"
+                      "<custom>\n" + protected_samples[8] + "\n\n"
                       "Hello Block.\n"
                   ),
                   " A.md": "# Leading Space Note\n",
@@ -269,7 +275,8 @@ jobs:
               status_state = {}
               titlebar_state = {}
               panel_state = {"open": False}
-              dialog_mode = {"state": "ok", "seq": 0}
+              dialog_mode = {"state": "ok", "seq": 0, "token": ""}
+              active_note_state = {"path": NOTE_NAME}
               active_selection = {"note": "WrapTarget.md", "text": "first\n\nsecond"}
               toasts = []
               opened_notes = []
@@ -301,7 +308,10 @@ jobs:
                       notes[p] = params["content"]
                       return {"ok": True, "revision": note_rev(notes[p])}
                   if method == "host.notes.active":
-                      return {"active": True, "path": NOTE_NAME, "title": NOTE_NAME[:-3], "notebook_root": str(notebook)}
+                      cur = active_note_state["path"]
+                      if not cur:
+                          return {"active": False, "path": "", "title": "", "notebook_root": str(notebook)}
+                      return {"active": True, "path": cur, "title": os.path.splitext(cur)[0], "notebook_root": str(notebook)}
                   if method == "host.notes.open":
                       opened_notes.append((params.get("notebook_root", ""), params["path"]))
                       return {"ok": True}
@@ -372,7 +382,8 @@ jobs:
                       if dialog_mode["state"] == "false":
                           return {"ok": False}
                       dialog_mode["seq"] += 1
-                      return {"ok": True, "dialog_token": f"dlg-{dialog_mode['seq']}"}
+                      dialog_mode["token"] = f"dlg-{dialog_mode['seq']}"
+                      return {"ok": True, "dialog_token": dialog_mode["token"]}
                   if method in ("host.ui.open_settings", "host.ui.close_dialog", "host.ui.refresh", "host.action.progress"):
                       return {"ok": True}
                   if method == "host.perf.snapshot":
@@ -536,12 +547,29 @@ jobs:
                           reject_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
                           require(reject_res.get("ok") is False, f"{locale}: confirm must reject after failed open_flush ({bad_mode})")
                       require("block-poop-everywhere:drop" in notes[" A.md"], f"{locale}: failed dialog paths deleted notes")
-                      # Real host-bound dialog open -> single-use confirm -> replay rejected.
-                      open_dlg = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
-                      require(open_dlg.get("ok") is True, f"{locale}: open_flush_dialog failed: {open_dlg}")
-                      flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      # Regression: panel_flush_page with no active note MUST NOT touch notes.list[0].
+                      active_note_state["path"] = ""
+                      no_active_flush = rpc("plugin.action", {"action_id": "panel_flush_page", "surface": "panel:poop-board", "values": {}})
+                      active_note_state["path"] = NOTE_NAME
+                      require(no_active_flush.get("ok") is False and "block-poop-everywhere:drop" in notes[" A.md"],
+                              f"{locale}: panel_flush_page modified unrelated note when active note was empty")
+                      # Real host-bound dialog open -> stale token / wrong surface / missing token all rejected -> current token succeeds -> replay rejected.
+                      open_dlg_1 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
+                      require(open_dlg_1.get("ok") is True, f"{locale}: open_flush_dialog #1 failed: {open_dlg_1}")
+                      tok1 = dialog_mode["token"]
+                      open_dlg_2 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
+                      require(open_dlg_2.get("ok") is True, f"{locale}: open_flush_dialog #2 failed: {open_dlg_2}")
+                      tok2 = dialog_mode["token"]
+                      require(tok1 != tok2, f"{locale}: expected fresh dialog token")
+                      bad_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
+                      require(bad_tok.get("ok") is False, f"{locale}: stale dialog_token {tok1} must be rejected after {tok2}")
+                      missing_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      require(missing_tok.get("ok") is False, f"{locale}: missing dialog_token must be rejected")
+                      wrong_surf = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "panel:poop-board", "values": {}, "dialog_token": tok2})
+                      require(wrong_surf.get("ok") is False, f"{locale}: non-dialog surface confirm must be rejected")
+                      flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
                       require(flush_res.get("ok") is True, f"{locale} dialog_flush_confirm failed: {flush_res}")
-                      replay_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
+                      replay_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
                       require(replay_res.get("ok") is False, f"{locale}: duplicate confirm replay must be rejected")
                       # Regression: all CommonMark protected containers + U+2028 MUST survive flush byte-for-byte.
                       for sample in protected_samples:
