@@ -4,11 +4,11 @@
   <img alt="Poop Everywhere" src="assets/card-en-light.png">
 </picture>
 
-**Official Kitchen-Sink Reference Plugin** -- a playful, complete plugin built to show Block plugin authors every single surface, menu, badge, backdrop, and host API available in the ecosystem.
+**Official Interactive Kitchen-Sink Reference Plugin** -- a playful, complete plugin built to show Block plugin authors all 17 interactive UI surfaces and common host APIs in one working codebase (declarative language grammars, Tarot mode, and legacy grid backgrounds have dedicated reference plugins).
 
-- **All 17 Extension Points Wired**: Titlebar buttons with live badges, command palette & shortcuts, page menu, editor context menu (with native dual-tone icons), sidebar tree context menu, collapsible left-sidebar section, file-tree row badges, custom vector editor backdrops (with dark-mode glow), right side panel, bottom status bar with icon, modal dialog, icon-bearing toasts, and an Appearance settings section.
-- **All 14 Declarative UI Controls**: The plugin settings page showcases `segmented`, `switch`, `select`, `input`, `secret`, `folder`, `checklist`, `actions`, `metrics`, `treemap`, `kv`, `preview`, `log_list`, and `group` with instant `visible_when` rules and collapsible cards.
-- **Zero Emoji, Zero Dependencies, Safely Reversible**: Written in pure Python standard library using Ocean Paper dual-tone SVG paths. Every note marker uses a clean `[poop:*]` blockquote tag and optimistic concurrency (`expected_revision`) so flushing removes only plugin markers without touching user prose.
+- **All 17 Interactive Extension Points Wired**: Titlebar buttons with live badges, command palette & shortcuts, page menu, editor context menu (with native dual-tone icons), sidebar tree context menu, collapsible left-sidebar section, file-tree row badges, custom vector editor backdrops (with dark-mode glow), right side panel, bottom status bar with icon, modal dialog, icon-bearing toasts across all 4 tones, and an Appearance settings section.
+- **All 14 Declarative UI Controls**: The plugin settings page showcases `segmented`, `switch`, `select`, `input`, `secret`, `folder`, `checklist`, `actions`, `metrics`, `treemap`, `kv`, `preview` (all 4 variants: `article`, `diff`, `cards`, `plan`), `log_list`, and `group` with instant `visible_when` rules and collapsible cards.
+- **Zero Emoji, Zero Dependencies, Safely Reversible**: Written in pure Python standard library using Ocean Paper dual-tone SVG paths. Every note marker carries an owned HTML signature tag and skips fenced/indented code blocks alongside optimistic concurrency (`expected_revision`) so flushing removes only plugin-authored lines without touching user prose or code examples.
 
 ## Extension Point Map
 
