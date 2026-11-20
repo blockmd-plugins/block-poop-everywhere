@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.3"
+PLUGIN_VERSION = "1.0.4"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -47,22 +47,31 @@ STORAGE_STATE = "runtime_state"
 DROP_SIGNATURE = "<!-- block-poop-everywhere:drop -->"
 MARKER_LINE_RE = re.compile(
     r"^[ ]{0,3}>[ ]?(?:\[poop:([a-z0-9_-]+)\])?(?:[^\r\n\u2028\u2029]*?)"
-    r"<!--\s*block-poop-everywhere:drop(?::([a-z0-9_-]+))?\s*-->[ \t]*(?:\r\n|\r|\n)?$"
+    r"<!--\s*block-poop-everywhere:drop(?::([a-z0-9_-]+))?(?::([a-z0-9_=,-]+))?\s*-->[ \t]*(?:\r\n|\r|\n)?$"
 )
 
 
-def drop_sig(kind):
+def drop_sig(kind, meta=""):
+    if meta:
+        return f"<!-- block-poop-everywhere:drop:{kind}:{meta} -->"
     return f"<!-- block-poop-everywhere:drop:{kind} -->"
+
+
 FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
-HTML_TYPE1_OPEN_RE = re.compile(r"^[ ]{0,3}<(pre|script|style|textarea)(?:[\s>]|$)", re.I)
+HTML_TYPE1_OPEN_RE = re.compile(r"^[ ]{0,3}<(pre|script|style|textarea)(?:[ \t>]|$)", re.I)
 HTML_TYPE1_CLOSE_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
 HTML_TYPE6_OPEN_RE = re.compile(
     r"^[ ]{0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|"
     r"dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
     r"h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|"
     r"optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
-    r"(?:[\s/>]|$)",
+    r"(?:[ \t/>]|$)",
     re.I,
+)
+HTML_TYPE7_OPEN_RE = re.compile(
+    r"^[ ]{0,3}(?:<[A-Za-z][A-Za-z0-9-]*"
+    r"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    r"[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$"
 )
 LIST_ITEM_RE = re.compile(r"^([ ]{0,3})([-*+]|\d{1,9}[.)])([ \t]+|$)")
 EMOJI_RE = re.compile(
@@ -259,7 +268,11 @@ STRINGS = {
         "toast_saved": "配置已保存并同步到全界面",
         "toast_exported": "已导出开发者扩展点手册到{dest}",
         "toast_archive_invalid": "归档目录不存在或不是有效文件夹，请重新选择",
+        "toast_export_failed": "导出失败：目标目录无写入权限或磁盘不可用",
+        "toast_unsafe_container": "目标笔记末尾处于未闭合代码块或 HTML 块中，已跳过以防标记无法清理",
+        "toast_unsafe_wrap": "所选内容包含未闭合代码块或 HTML 块，无法保证无损还原，已保留原文",
         "toast_rescanned": "扫描完成：共发现 {n} 坨（{notes} 篇笔记）",
+        "toast_rescan_partial": "扫描部分完成：发现 {n} 坨（{notes} 篇），另有 {failed} 篇读取失败",
         "toast_kept": "好，这几坨先留着",
         "toast_opened_note": "已跳转到 {note}",
         "toast_open_unavailable": "当前运行环境不支持直接跳转笔记",
@@ -415,7 +428,11 @@ STRINGS = {
         "toast_saved": "Settings saved and synced across surfaces",
         "toast_exported": "Exported extension guide to {dest}",
         "toast_archive_invalid": "Archive folder does not exist or is not a directory",
+        "toast_export_failed": "Export failed: target directory is not writable",
+        "toast_unsafe_container": "Skipped drop: note ends inside an unclosed code or HTML block",
+        "toast_unsafe_wrap": "Skipped wrap: selection has unclosed code/HTML that cannot round-trip losslessly",
         "toast_rescanned": "Scan finished: {n} drop(s) in {notes} note(s)",
+        "toast_rescan_partial": "Partial scan: {n} drop(s) in {notes} note(s), {failed} failed to read",
         "toast_kept": "Kept existing drops for now",
         "toast_opened_note": "Opened {note}",
         "toast_open_unavailable": "Note jump unavailable in this host runtime",
@@ -571,22 +588,29 @@ def leading_columns(text, start_col=0):
     return col - start_col, idx
 
 
-def strip_single_bq_prefix(text):
-    """Strip one top-level blockquote marker (<=3 spaces + '>' + optional space)."""
-    cols, idx = leading_columns(text)
+def strip_single_bq_prefix(text, start_col=0):
+    """Strip one blockquote marker (<=3 spaces + '>' + optional space/tab).
+
+    Returns (inner_text, inner_start_col) using exact CommonMark tab-stop columns,
+    or (None, start_col) when text does not start with a blockquote marker.
+    """
+    cols, idx = leading_columns(text, start_col)
     if cols > 3 or idx >= len(text) or text[idx] != ">":
-        return None
+        return None, start_col
+    col_after_gt = start_col + cols + 1
     rest = text[idx + 1:]
     if rest.startswith(" "):
-        return rest[1:]
+        return rest[1:], col_after_gt + 1
     if rest.startswith("\t"):
-        # Tab after '>' expands across 4-col stop; 1 col consumed by optional space.
-        return "   " + rest[1:]
-    return rest
+        # CommonMark §2.2: tab expands to next 4-col tab stop from col_after_gt;
+        # the optional single space after '>' consumes 1 col, leaving tab_w - 1 spaces.
+        tab_w = 4 - (col_after_gt % 4)
+        return (" " * (tab_w - 1)) + rest[1:], col_after_gt + 1
+    return rest, col_after_gt
 
 
-def html_block_end_kind(stripped_nl):
-    """Detect CommonMark §4.6 HTML block open; return end sentinel or None."""
+def html_block_end_kind(stripped_nl, allow_type7=False):
+    """Detect CommonMark §4.6 HTML block open (types 1-7); return sentinel or None."""
     if HTML_TYPE1_OPEN_RE.match(stripped_nl):
         return "type1"
     s = stripped_nl.lstrip(" ")
@@ -601,6 +625,8 @@ def html_block_end_kind(stripped_nl):
     if s.startswith("<![CDATA["):
         return "cdata"
     if HTML_TYPE6_OPEN_RE.match(stripped_nl):
+        return "blank"
+    if allow_type7 and HTML_TYPE7_OPEN_RE.match(stripped_nl):
         return "blank"
     return None
 
@@ -629,23 +655,24 @@ def iter_markdown_lines(content):
     html_kind = None
     # List container stack: list of minimum content column offsets
     list_indents = []
-    # Blockquote-nested fence/html state
+    # Blockquote-nested state (tracks fences, HTML blocks, indented code, and nested lists)
     bq_fence_char = ""
     bq_fence_len = 0
+    bq_fence_list_indent = None
     bq_html_kind = None
     bq_prev_blank = True
     bq_in_indented = False
+    bq_list_indents = []
     prev_blank = True
 
     for raw_line in split_md_lines(content):
         stripped_nl = raw_line.rstrip("\r\n")
         is_blank = stripped_nl.strip(" \t") == ""
-        cols, idx = leading_columns(stripped_nl)
+        cols, idx = leading_columns(stripped_nl, 0)
 
         # 1. Active fenced code block (top-level or list-nested)
         if in_fence:
             if fence_list_indent is not None and not is_blank and cols < fence_list_indent:
-                # Non-blank line dedented past enclosing list item closes both fence and list item.
                 in_fence = False
                 fence_char = ""
                 fence_len = 0
@@ -677,13 +704,15 @@ def iter_markdown_lines(content):
             continue
 
         # Reset blockquote-nested state on lines that don't continue a blockquote
-        bq_inner = strip_single_bq_prefix(stripped_nl)
+        bq_inner, bq_col = strip_single_bq_prefix(stripped_nl, 0)
         if bq_inner is None:
             bq_fence_char = ""
             bq_fence_len = 0
+            bq_fence_list_indent = None
             bq_html_kind = None
             bq_prev_blank = True
             bq_in_indented = False
+            bq_list_indents = []
 
         # 3. Blank line
         if is_blank:
@@ -696,7 +725,6 @@ def iter_markdown_lines(content):
             while list_indents and cols < list_indents[-1]:
                 list_indents.pop()
             if list_indents:
-                # Line is inside a list item; track nested fenced code cleanly
                 inner_list = stripped_nl[idx:]
                 m_lf = FENCE_OPEN_RE.match(inner_list)
                 if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
@@ -737,8 +765,8 @@ def iter_markdown_lines(content):
                     yield raw_line, False
                     continue
 
-        # 7. Top-level raw HTML block open
-        hk = html_block_end_kind(stripped_nl)
+        # 7. Top-level raw HTML block open (CommonMark types 1-7)
+        hk = html_block_end_kind(stripped_nl, allow_type7=prev_blank)
         if hk is not None:
             yield raw_line, False
             if not html_block_closes(hk, stripped_nl):
@@ -749,7 +777,7 @@ def iter_markdown_lines(content):
         # 8. List item open (bullet or ordered) — including `- ``` ` on same line
         m_list = LIST_ITEM_RE.match(stripped_nl)
         if m_list:
-            prefix_cols, _ = leading_columns(m_list.group(0))
+            prefix_cols, _ = leading_columns(m_list.group(0), 0)
             list_indents.append(max(prefix_cols, cols + len(m_list.group(2)) + 1))
             after_marker = stripped_nl[m_list.end():]
             m_lf = FENCE_OPEN_RE.match(after_marker)
@@ -765,17 +793,28 @@ def iter_markdown_lines(content):
         # 9. Top-level blockquote (only place plugin drop lines live)
         if bq_inner is not None:
             inner_blank = bq_inner.strip(" \t") == ""
+            bcols, bidx = leading_columns(bq_inner, bq_col)
+
+            # 9a. Active blockquote-nested fence (direct or inside bq list)
             if bq_fence_char:
-                yield raw_line, False
-                bcols, bidx = leading_columns(bq_inner)
-                if bcols <= 3:
-                    m_bc = re.match(r"^(`{3,}|~{3,})[ \t]*$", bq_inner[bidx:])
-                    if m_bc and m_bc.group(1)[0] == bq_fence_char and len(m_bc.group(1)) >= bq_fence_len:
-                        bq_fence_char = ""
-                        bq_fence_len = 0
-                bq_prev_blank = inner_blank
-                prev_blank = False
-                continue
+                if bq_fence_list_indent is not None and not inner_blank and bcols < bq_fence_list_indent:
+                    bq_fence_char = ""
+                    bq_fence_len = 0
+                    bq_fence_list_indent = None
+                else:
+                    yield raw_line, False
+                    bmax_close = 3 if bq_fence_list_indent is None else bq_fence_list_indent + 3
+                    if not inner_blank and bcols <= bmax_close:
+                        m_bc = re.match(r"^(`{3,}|~{3,})[ \t]*$", bq_inner[bidx:])
+                        if m_bc and m_bc.group(1)[0] == bq_fence_char and len(m_bc.group(1)) >= bq_fence_len:
+                            bq_fence_char = ""
+                            bq_fence_len = 0
+                            bq_fence_list_indent = None
+                    bq_prev_blank = inner_blank
+                    prev_blank = False
+                    continue
+
+            # 9b. Active blockquote-nested HTML block
             if bq_html_kind is not None:
                 if bq_html_kind == "blank" and inner_blank:
                     bq_html_kind = None
@@ -785,11 +824,34 @@ def iter_markdown_lines(content):
                 bq_prev_blank = inner_blank
                 prev_blank = False
                 continue
-            bcols, _ = leading_columns(bq_inner)
-            if bq_in_indented:
-                if inner_blank or bcols >= 4:
+
+            if inner_blank:
+                yield raw_line, False
+                bq_prev_blank = True
+                prev_blank = False
+                continue
+
+            # 9c. Active blockquote-nested list container
+            if bq_list_indents:
+                while bq_list_indents and bcols < bq_list_indents[-1]:
+                    bq_list_indents.pop()
+                if bq_list_indents:
+                    inner_bl = bq_inner[bidx:]
+                    m_blf = FENCE_OPEN_RE.match(inner_bl)
+                    if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
+                        bq_fence_char = m_blf.group(1)[0]
+                        bq_fence_len = len(m_blf.group(1))
+                        bq_fence_list_indent = bq_list_indents[-1]
                     yield raw_line, False
-                    bq_prev_blank = inner_blank
+                    bq_prev_blank = False
+                    prev_blank = False
+                    continue
+
+            # 9d. Blockquote-nested indented code
+            if bq_in_indented:
+                if bcols >= 4:
+                    yield raw_line, False
+                    bq_prev_blank = False
                     prev_blank = False
                     continue
                 bq_in_indented = False
@@ -799,16 +861,19 @@ def iter_markdown_lines(content):
                 bq_prev_blank = False
                 prev_blank = False
                 continue
+
+            # 9e. Blockquote-nested fence or HTML block open
             if bcols <= 3:
-                m_bo = FENCE_OPEN_RE.match(bq_inner)
+                m_bo = FENCE_OPEN_RE.match(bq_inner[bidx:])
                 if m_bo and not (m_bo.group(1)[0] == "`" and "`" in m_bo.group(2)):
                     bq_fence_char = m_bo.group(1)[0]
                     bq_fence_len = len(m_bo.group(1))
+                    bq_fence_list_indent = None
                     yield raw_line, False
                     bq_prev_blank = False
                     prev_blank = False
                     continue
-                bhk = html_block_end_kind(bq_inner)
+                bhk = html_block_end_kind(bq_inner, allow_type7=bq_prev_blank)
                 if bhk is not None:
                     if not html_block_closes(bhk, bq_inner):
                         bq_html_kind = bhk
@@ -816,8 +881,24 @@ def iter_markdown_lines(content):
                     bq_prev_blank = False
                     prev_blank = False
                     continue
+                m_blist = LIST_ITEM_RE.match(bq_inner)
+                if m_blist:
+                    bprefix_cols, _ = leading_columns(m_blist.group(0), bq_col)
+                    bq_list_indents.append(max(bprefix_cols, bcols + len(m_blist.group(2)) + 1))
+                    after_bm = bq_inner[m_blist.end():]
+                    m_blf = FENCE_OPEN_RE.match(after_bm)
+                    if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
+                        bq_fence_char = m_blf.group(1)[0]
+                        bq_fence_len = len(m_blf.group(1))
+                        bq_fence_list_indent = bq_list_indents[-1]
+                    yield raw_line, False
+                    bq_prev_blank = False
+                    prev_blank = False
+                    continue
+
             # Nested blockquote (`> > ...`) is never a plugin drop line
-            is_nested_bq = strip_single_bq_prefix(bq_inner) is not None
+            nested_inner, _ = strip_single_bq_prefix(bq_inner, bq_col)
+            is_nested_bq = nested_inner is not None
             bq_prev_blank = inner_blank
             prev_blank = False
             yield raw_line, (not is_nested_bq)
@@ -1021,13 +1102,33 @@ class PoopEverywherePlugin:
     def strip_markers(self, content):
         if not isinstance(content, str):
             return "", 0
+        items = list(iter_markdown_lines(content))
+        n_items = len(items)
+
+        def is_bare_bq_sep(raw_line):
+            stripped_nl = raw_line.rstrip("\r\n")
+            cols, idx = leading_columns(stripped_nl, 0)
+            return cols <= 3 and stripped_nl[idx:].rstrip(" \t") == ">"
+
+        def is_nonwrap_drop(idx_pos):
+            if idx_pos >= n_items:
+                return False
+            raw, elig = items[idx_pos]
+            if not elig:
+                return False
+            mm = MARKER_LINE_RE.match(raw)
+            if not mm:
+                return False
+            k = mm.group(2) or mm.group(1) or "classic"
+            return k not in ("wrap-start", "wrap-end")
+
         kept = []
         removed = 0
         in_wrap = False
         eat_next_blank = False
         prev_removed_drop = False
         pending_bq_sep = False
-        for line, eligible in iter_markdown_lines(content):
+        for i, (line, eligible) in enumerate(items):
             if eat_next_blank:
                 eat_next_blank = False
                 if line in ("\n", "\r\n", "\r"):
@@ -1035,6 +1136,7 @@ class PoopEverywherePlugin:
             if eligible:
                 m = MARKER_LINE_RE.match(line)
                 if m:
+                    is_legacy = m.group(2) is None
                     kind = m.group(2) or m.group(1) or "classic"
                     if kind == "wrap-start":
                         in_wrap = True
@@ -1054,13 +1156,22 @@ class PoopEverywherePlugin:
                     else:
                         if pending_bq_sep and kept:
                             kept.pop()
-                        elif len(kept) >= 2 and kept[-1] in ("\n", "\r\n", "\r"):
-                            kept.pop()
+                        elif len(kept) >= 2 and kept[-1] in ("\n", "\r\n", "\r") and kept[-2] not in ("\n", "\r\n", "\r"):
+                            next_is_eof = i + 1 >= n_items
+                            next_is_blank = (not next_is_eof) and (items[i + 1][0] in ("\n", "\r\n", "\r"))
+                            next_is_drop = is_nonwrap_drop(i + 1) or (
+                                (i + 2 < n_items) and is_bare_bq_sep(items[i + 1][0]) and is_nonwrap_drop(i + 2)
+                            )
+                            if is_legacy:
+                                if prev_removed_drop or next_is_eof:
+                                    kept.pop()
+                            elif prev_removed_drop or next_is_eof or next_is_blank or next_is_drop:
+                                kept.pop()
                         prev_removed_drop = True
                         pending_bq_sep = False
                     removed += 1
                     continue
-            if prev_removed_drop and not pending_bq_sep and line.rstrip("\r\n").strip(" \t") == ">":
+            if prev_removed_drop and not pending_bq_sep and is_bare_bq_sep(line):
                 pending_bq_sep = True
             else:
                 prev_removed_drop = False
@@ -1072,12 +1183,12 @@ class PoopEverywherePlugin:
         try:
             res = bridge.call_host("host.notes.list", {})
         except HostRPCError:
-            return self.note_counts(), 0, False
+            return self.note_counts(), set(), False
         if not isinstance(res, dict) or not isinstance(res.get("notes"), list):
-            return self.note_counts(), 0, False
+            return self.note_counts(), set(), False
         prev_counts = self.note_counts()
         counts = {}
-        read_failures = 0
+        failed_paths = set()
         for item in res["notes"]:
             rel = item.get("path")
             if not isinstance(rel, str) or not rel:
@@ -1085,7 +1196,7 @@ class PoopEverywherePlugin:
             try:
                 note = bridge.call_host("host.notes.read", {"path": rel})
             except HostRPCError:
-                read_failures += 1
+                failed_paths.add(rel)
                 if rel in prev_counts:
                     counts[rel] = prev_counts[rel]
                 continue
@@ -1093,7 +1204,7 @@ class PoopEverywherePlugin:
             if n > 0:
                 counts[rel] = n
         self.set_note_counts(counts)
-        return counts, read_failures, True
+        return counts, failed_paths, True
 
     def active_counts_summary(self):
         counts = self.note_counts()
@@ -1116,12 +1227,14 @@ class PoopEverywherePlugin:
         style = self.config.get("style", "normal")
         repeat = {"shy": 1, "normal": 1, "wild": 3}.get(style, 1)
         if wrapped_text:
+            # Always end wrap-start with LF ('\n\n') so a leading LF in wrapped_text
+            # never merges with a trailing CR separator into a single CRLF line.
             if wrapped_text.endswith("\r\n"):
-                return f"> {caption}{drop_sig('wrap-start')}\r\n\r\n{wrapped_text}\r\n> ···{drop_sig('wrap-end')}\r\n"
+                return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\n> ···{drop_sig('wrap-end')}\r\n"
             if wrapped_text.endswith("\n"):
                 return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\n> ···{drop_sig('wrap-end')}\n"
             if wrapped_text.endswith("\r"):
-                return f"> {caption}{drop_sig('wrap-start')}\r\r{wrapped_text}\r> ···{drop_sig('wrap-end')}\r"
+                return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\r> ···{drop_sig('wrap-end')}\r"
             return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\n\n> ···{drop_sig('wrap-end')}"
         lines = []
         for idx in range(repeat):
@@ -1214,14 +1327,22 @@ class PoopEverywherePlugin:
             payload["label"] = label
         bridge.notify_host("host.action.progress", payload)
 
-    def resolve_target_note(self, bridge, explicit_note="", strict=False):
+    def resolve_active_note(self, bridge):
+        res = self.safe_call(bridge, "host.notes.active", {})
+        if isinstance(res, dict) and isinstance(res.get("path"), str) and res["path"] != "":
+            return res["path"]
+        return ""
+
+    def resolve_target_note(self, bridge, explicit_note="", strict=False, active_only=False):
         if isinstance(explicit_note, str) and explicit_note != "":
             return explicit_note
         if strict:
             return ""
-        res = self.safe_call(bridge, "host.notes.active", {})
-        if isinstance(res, dict) and isinstance(res.get("path"), str) and res["path"] != "":
-            return res["path"]
+        active = self.resolve_active_note(bridge)
+        if active:
+            return active
+        if active_only:
+            return ""
         listed = self.safe_call(bridge, "host.notes.list", {})
         if isinstance(listed, dict) and listed.get("notes"):
             return str(listed["notes"][0].get("path") or "")
@@ -1231,15 +1352,24 @@ class PoopEverywherePlugin:
         t = self.t()
         if not note_rel:
             return False, "warning", t["toast_no_note"]
+        block = self.build_drop_block(wrapped_text)
+        if wrapped_text:
+            rt_text, rt_rem = self.strip_markers(block)
+            if rt_rem != 2 or rt_text != wrapped_text:
+                return False, "warning", t["toast_unsafe_wrap"]
         try:
             read_res = bridge.call_host("host.notes.read", {"path": note_rel})
         except HostRPCError as exc:
             return False, "error", self.localize_error(exc.message)
         content = str(read_res.get("content") or "")
         rev = read_res.get("revision")
-        block = self.build_drop_block(wrapped_text)
         sep = "\n\n" if content and not content.endswith("\n\n") else ("\n" if content and not content.endswith("\n") else "")
         next_content = content + sep + block + "\n"
+        prev_cnt = self.count_markers(content)
+        expected_added = self.count_markers(block)
+        new_cnt = self.count_markers(next_content)
+        if expected_added <= 0 or new_cnt != prev_cnt + expected_added:
+            return False, "warning", t["toast_unsafe_container"]
         write_params = {"path": note_rel, "content": next_content}
         if isinstance(rev, str):
             write_params["expected_revision"] = rev
@@ -1249,17 +1379,15 @@ class PoopEverywherePlugin:
             if exc.code == -32006:
                 return False, "warning", t["toast_conflict"].format(note=note_rel)
             return False, "error", self.localize_error(exc.message)
-        added = self.count_markers(block)
-        new_cnt = self.count_markers(next_content)
         self.note_counts()[note_rel] = new_cnt
-        self.state["total_dropped"] += added
+        self.state["total_dropped"] += expected_added
         self.state["last_drop_at"] = now_hhmm()
-        self.append_log("drop", note=note_rel, count=added, tone="success")
+        self.append_log("drop", note=note_rel, count=expected_added, tone="success")
         self.save_state(bridge)
         self.sync_host_ui(bridge)
         if new_cnt >= 5:
             return True, "warning", t["toast_heavy_warn"].format(note=note_rel, n=new_cnt)
-        return True, "success", t["toast_dropped_note"].format(note=note_rel, n=added)
+        return True, "success", t["toast_dropped_note"].format(note=note_rel, n=expected_added)
 
     def drop_at_editor_or_note(self, bridge, note_rel="", selection="", wrap_selection=False, source=""):
         t = self.t()
@@ -1282,6 +1410,11 @@ class PoopEverywherePlugin:
 
         is_wrapping = bool(wrap_selection and sel_text)
         block = self.build_drop_block(sel_text if is_wrapping else "")
+        if is_wrapping:
+            rt_text, rt_rem = self.strip_markers(block)
+            if rt_rem != 2 or rt_text != sel_text:
+                return False, "warning", t["toast_unsafe_wrap"]
+
         inserted = None
         if is_wrapping:
             insert_params = {"text": block, "mode": "replace"}
@@ -1289,7 +1422,9 @@ class PoopEverywherePlugin:
                 insert_params["note"] = target
             try:
                 inserted = self.safe_call(bridge, "host.editor.insert", insert_params)
-            except HostRPCError:
+            except HostRPCError as exc:
+                if exc.code == -32006:
+                    return False, "warning", t["toast_conflict"].format(note=target or "note")
                 inserted = None
         elif "editor_insert_mode" in self.capabilities:
             insert_params = {"text": "\n" + block + "\n", "mode": "insert"}
@@ -1297,7 +1432,9 @@ class PoopEverywherePlugin:
                 insert_params["note"] = target
             try:
                 inserted = self.safe_call(bridge, "host.editor.insert", insert_params)
-            except HostRPCError:
+            except HostRPCError as exc:
+                if exc.code == -32006:
+                    return False, "warning", t["toast_conflict"].format(note=target or "note")
                 inserted = None
 
         if isinstance(inserted, dict) and inserted.get("ok"):
@@ -1321,7 +1458,8 @@ class PoopEverywherePlugin:
 
     def flush_single_note(self, bridge, note_rel, strict=False):
         t = self.t()
-        target = self.resolve_target_note(bridge, note_rel, strict=strict)
+        # Flushing "current page" must ONLY target the active note (never fall back to notes.list[0]).
+        target = self.resolve_target_note(bridge, note_rel, strict=strict, active_only=True)
         if not target:
             return False, "warning", t["toast_no_note"]
         try:
@@ -1354,26 +1492,27 @@ class PoopEverywherePlugin:
 
     def flush_all_notes(self, bridge):
         t = self.t()
-        _, scan_read_failures, list_ok = self.scan_notebook_markers(bridge)
+        _, scan_failed_paths, list_ok = self.scan_notebook_markers(bridge)
         if not list_ok:
             return False, "error", t["toast_list_failed"]
         counts = self.note_counts()
         targets = sorted(counts.keys())
         total_removed = 0
         touched_notes = 0
-        conflicts = []
-        failed_count = scan_read_failures
+        conflict_paths = set()
+        failed_paths = set(scan_failed_paths)
         total_steps = max(len(targets), 1)
         for idx, rel in enumerate(targets, 1):
             self.report_progress(bridge, idx - 1, total_steps, t["progress_flush"])
             try:
                 read_res = bridge.call_host("host.notes.read", {"path": rel})
             except HostRPCError:
-                failed_count += 1
+                failed_paths.add(rel)
                 continue
             cleaned, removed = self.strip_markers(str(read_res.get("content") or ""))
             if removed <= 0:
                 counts.pop(rel, None)
+                failed_paths.discard(rel)
                 continue
             write_params = {"path": rel, "content": cleaned}
             if isinstance(read_res.get("revision"), str):
@@ -1381,15 +1520,19 @@ class PoopEverywherePlugin:
             try:
                 bridge.call_host("host.notes.write", write_params)
                 counts.pop(rel, None)
+                failed_paths.discard(rel)
                 total_removed += removed
                 touched_notes += 1
             except HostRPCError as exc:
                 if exc.code == -32006:
-                    conflicts.append(rel)
+                    conflict_paths.add(rel)
+                    failed_paths.discard(rel)
                 else:
-                    failed_count += 1
+                    failed_paths.add(rel)
             self.report_progress(bridge, idx, total_steps, t["progress_flush"])
 
+        conflicts = sorted(conflict_paths)
+        failed_count = len(failed_paths)
         incomplete = bool(conflicts or failed_count > 0)
         if not incomplete and self.config["bg_enabled"]:
             self.config["bg_enabled"] = False
@@ -1414,13 +1557,16 @@ class PoopEverywherePlugin:
         archive_dir = self.config.get("archive_dir") or ""
         if archive_dir:
             if not os.path.isdir(archive_dir):
-                return None, ""
+                return None, "", "invalid"
             out_dir = archive_dir
             dest_label = os.path.basename(archive_dir.rstrip(os.sep)) or archive_dir
         else:
             out_dir = self.downloads_dir or self.data_dir or os.getcwd()
             dest_label = "Downloads" if self.is_en() else "下载目录"
-            os.makedirs(out_dir, exist_ok=True)
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except OSError:
+                return None, "", "write_failed"
         filename = "block-poop-everywhere-guide-en.md" if self.is_en() else "block-poop-everywhere-guide.md"
         out_path = os.path.join(out_dir, filename)
         total, notes = self.active_counts_summary()
@@ -1452,9 +1598,12 @@ class PoopEverywherePlugin:
             ]
         for key, perm in EXTENSION_MAP:
             lines.append(f"| `{key}` | `{perm}` |")
-        with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-        return out_path, dest_label
+        try:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        except OSError:
+            return None, "", "write_failed"
+        return out_path, dest_label, ""
 
     def render_log_entry(self, entry):
         t = self.t()
@@ -2226,9 +2375,10 @@ class PoopEverywherePlugin:
             surface = str(params.get("surface") or SURFACE_SETTINGS)
             action_id = str(params.get("action_id") or "")
             values = params.get("values") if isinstance(params.get("values"), dict) else {}
+            dialog_token = str(params.get("dialog_token") or "").strip()
             if surface != SURFACE_DIALOG:
                 self.merge_form_values(bridge, values, surface)
-            return self.handle_action(bridge, surface, action_id, values)
+            return self.handle_action(bridge, surface, action_id, values, dialog_token)
 
         if method == "plugin.command":
             cmd_id = str(params.get("command_id") or "")
@@ -2243,7 +2393,7 @@ class PoopEverywherePlugin:
 
         raise ValueError(self.t()["err_unknown_method"].format(method=method))
 
-    def handle_action(self, bridge, surface, action_id, values):
+    def handle_action(self, bridge, surface, action_id, values, dialog_token=""):
         t = self.t()
         if action_id.startswith("open_target:"):
             return self.handle_open_target_action(bridge, action_id, surface)
@@ -2286,7 +2436,7 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "rescan_notes":
-            _, _, list_ok = self.scan_notebook_markers(bridge)
+            _, failed_paths, list_ok = self.scan_notebook_markers(bridge)
             if not list_ok:
                 return {
                     "ok": False,
@@ -2298,6 +2448,13 @@ class PoopEverywherePlugin:
             self.sync_host_ui(bridge)
             self.refresh_other_surfaces(bridge, surface)
             total, notes = self.active_counts_summary()
+            if failed_paths:
+                return {
+                    "ok": False,
+                    "tone": "warning",
+                    "status": t["toast_rescan_partial"].format(n=total, notes=notes, failed=len(failed_paths)),
+                    "page": self.render_surface(bridge, surface),
+                }
             return {
                 "ok": True,
                 "tone": "success",
@@ -2306,12 +2463,13 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "export_guide":
-            out_path, dest_label = self.export_developer_guide()
+            out_path, dest_label, err_kind = self.export_developer_guide()
             if not out_path:
+                msg = t["toast_archive_invalid"] if err_kind == "invalid" else t["toast_export_failed"]
                 return {
                     "ok": False,
                     "tone": "error",
-                    "status": t["toast_archive_invalid"],
+                    "status": msg,
                     "page": self.render_surface(bridge, surface),
                 }
             return {
@@ -2380,7 +2538,9 @@ class PoopEverywherePlugin:
             return {"ok": True, "tone": "info", "status": t["toast_kept"], "page": self.render_flush_dialog()}
 
         if action_id == "dialog_flush_confirm":
-            if not self.pending_flush_token or self.pending_flush_nb != self.notebook_root:
+            if surface != SURFACE_DIALOG or not self.pending_flush_token or self.pending_flush_nb != self.notebook_root:
+                return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_surface(bridge, surface)}
+            if "dialog_token" in self.capabilities and dialog_token != self.pending_flush_token:
                 return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_flush_dialog()}
             secret = self.config.get("flush_secret") or ""
             if secret and str(values.get("confirm_secret") or "") != secret:
