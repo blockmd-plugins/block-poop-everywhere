@@ -12,9 +12,11 @@ Demonstrates every Block plugin extension point and declarative UI control:
 """
 
 import datetime
+import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 
 if hasattr(sys.stdin, "reconfigure"):
@@ -23,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -42,7 +44,14 @@ ALL_SURFACES = (
 STORAGE_CONFIG = "config"
 STORAGE_STATE = "runtime_state"
 
-MARKER_LINE_RE = re.compile(r"^\s*>\s*\[poop:([a-z0-9_-]+)\](?:\s|$)")
+DROP_SIGNATURE = "<!-- block-poop-everywhere:drop -->"
+MARKER_LINE_RE = re.compile(
+    r"^\s*>\s*\[poop:([a-z0-9_-]+)\](?:\s.*)?<!--\s*block-poop-everywhere:drop\s*-->\s*$"
+)
+FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+EMOJI_RE = re.compile(
+    r"[\u2600-\u27bf\ufe00-\ufe0f\U0001f000-\U0001faff]"
+)
 CHINESE_RE = re.compile(
     r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
     r"\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uffef]"
@@ -219,16 +228,24 @@ STRINGS = {
         "toast_flushed_note": "已冲掉 {note} 里的 {n} 坨屎",
         "toast_note_clean": "{note} 本来就很干净",
         "toast_flushed_all": "全部冲掉了，共清理 {n} 坨（{notes} 篇笔记）",
+        "toast_flush_partial": "部分笔记未冲完：已清 {n} 坨，冲突 {conflicts} 篇，失败 {failed} 篇",
         "toast_nothing_flush": "已经干干净净，没有可冲掉的屎",
+        "toast_dialog_unavailable": "当前宿主不支持确认弹窗，为防误删已取消冲水",
+        "toast_stale_confirm": "确认会话已失效或笔记本已切换，请重新点开确认弹窗",
         "toast_wrong_secret": "冲水口令不对，未能冲水",
         "toast_conflict": "{note} 有未保存编辑，请先保存后再操作",
         "toast_saved": "配置已保存并同步到全界面",
-        "toast_exported": "已导出开发者扩展点手册到下载目录",
+        "toast_exported": "已导出开发者扩展点手册到{dest}",
         "toast_rescanned": "扫描完成：共发现 {n} 坨（{notes} 篇笔记）",
         "toast_kept": "好，这几坨先留着",
         "toast_opened_note": "已跳转到 {note}",
         "toast_open_unavailable": "当前运行环境不支持直接跳转笔记",
-        "toast_demo_1": "轻提示演示：已支持在通知左侧展示插件双色图标",
+        "toast_open_missing": "这条记录未绑定笔记本，无法跳转",
+        "toast_demo_info": "信息提示：左侧展示插件双色图标",
+        "toast_demo_success": "成功提示：标记写入与状态同步完成",
+        "toast_demo_warning": "警告提示：单篇堆叠过多会触发提醒",
+        "toast_demo_error": "错误提示：未授权笔记本将被安全拦截",
+        "toast_demo_1": "已依次排队演示四类语气带图标轻提示",
         "log_drop": "在 {note} 拉了 {n} 坨",
         "log_wrap": "把 {note} 的选区变成了屎",
         "log_flush_note": "冲掉了 {note} 的 {n} 坨",
@@ -268,7 +285,7 @@ STRINGS = {
         "act_flush_all": "Flush All",
         "act_flush_page": "Flush This Page",
         "act_save": "Save Settings",
-        "act_demo_toast": "Preview Toast",
+        "act_demo_toast": "Preview 4 Toasts",
         "act_rescan": "Rescan Notes",
         "act_toggle_bg": "Toggle Backdrop",
         "act_apply_bg": "Apply Backdrop",
@@ -364,16 +381,24 @@ STRINGS = {
         "toast_flushed_note": "Flushed {n} drop(s) from {note}",
         "toast_note_clean": "{note} is already squeaky clean",
         "toast_flushed_all": "Flushed {n} drop(s) across {notes} note(s)",
+        "toast_flush_partial": "Partial flush: cleared {n}, {conflicts} conflict(s), {failed} failed",
         "toast_nothing_flush": "Everything is already clean",
+        "toast_dialog_unavailable": "Confirmation dialog unavailable; flush aborted for safety",
+        "toast_stale_confirm": "Confirmation expired or notebook changed; reopen the dialog",
         "toast_wrong_secret": "Incorrect flush passcode; flush aborted",
         "toast_conflict": "{note} has unsaved edits. Save first and retry.",
         "toast_saved": "Settings saved and synced across surfaces",
-        "toast_exported": "Exported extension guide to Downloads",
+        "toast_exported": "Exported extension guide to {dest}",
         "toast_rescanned": "Scan finished: {n} drop(s) in {notes} note(s)",
         "toast_kept": "Kept existing drops for now",
         "toast_opened_note": "Opened {note}",
         "toast_open_unavailable": "Note jump unavailable in this host runtime",
-        "toast_demo_1": "Toast preview: custom dual-tone plugin icon supported",
+        "toast_open_missing": "This log entry is not bound to a notebook",
+        "toast_demo_info": "Info toast: dual-tone plugin icon on the left",
+        "toast_demo_success": "Success toast: drop synced across surfaces",
+        "toast_demo_warning": "Warning toast: heavy stack alert triggered",
+        "toast_demo_error": "Error toast: disallowed notebook safely skipped",
+        "toast_demo_1": "Queued all 4 icon-bearing toast tones",
         "log_drop": "Dropped {n} in {note}",
         "log_wrap": "Wrapped selection in {note}",
         "log_flush_note": "Flushed {n} from {note}",
@@ -473,6 +498,61 @@ def format_bytes_mb(num_bytes):
     return f"{num_bytes / (1024 * 1024):.1f} MB"
 
 
+def iter_markdown_lines(content):
+    """Yield (line, in_code_block) while skipping fenced and indented code blocks."""
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    prev_blank = True
+    in_indented = False
+    for raw_line in content.splitlines(keepends=True):
+        stripped_nl = raw_line.rstrip("\r\n")
+        if in_fence:
+            yield raw_line, True
+            m_close = re.match(r"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", stripped_nl)
+            if m_close and m_close.group(1)[0] == fence_char and len(m_close.group(1)) >= fence_len:
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+                prev_blank = False
+            continue
+
+        if stripped_nl.strip() == "":
+            yield raw_line, in_indented
+            prev_blank = True
+            continue
+
+        is_indented = stripped_nl.startswith("    ") or stripped_nl.startswith("\t")
+        if in_indented:
+            if is_indented:
+                yield raw_line, True
+                prev_blank = False
+                continue
+            in_indented = False
+
+        if prev_blank and is_indented:
+            in_indented = True
+            prev_blank = False
+            yield raw_line, True
+            continue
+
+        m_open = FENCE_OPEN_RE.match(stripped_nl)
+        if m_open:
+            marker = m_open.group(1)
+            info = m_open.group(2)
+            # CommonMark: backtick fence info strings must not contain backticks.
+            if not (marker[0] == "`" and "`" in info):
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+                prev_blank = False
+                yield raw_line, True
+                continue
+
+        prev_blank = False
+        yield raw_line, False
+
+
 class PoopEverywherePlugin:
     def __init__(self):
         self.locale = "zh"
@@ -480,11 +560,13 @@ class PoopEverywherePlugin:
         self.downloads_dir = ""
         self.data_dir = ""
         self.host_version = ""
+        self.host_theme = "system"
         self.capabilities = set()
         self.config = dict(DEFAULT_CONFIG)
         self.state = dict(DEFAULT_STATE)
-        self.panel_open = False
-        self.dark_theme = False
+        self.open_targets = {}
+        self.pending_flush_token = ""
+        self.pending_flush_nb = ""
         self.last_rss_bytes = 0
 
     def is_en(self):
@@ -550,8 +632,8 @@ class PoopEverywherePlugin:
         if isinstance(raw.get("note_counts"), dict):
             cleaned = {}
             for k, v in raw["note_counts"].items():
-                if isinstance(k, str) and k.strip() and isinstance(v, int) and v > 0:
-                    cleaned[k.strip()] = v
+                if isinstance(k, str) and k and isinstance(v, int) and v > 0:
+                    cleaned[k] = v
             st["note_counts"] = cleaned
         if isinstance(raw.get("logs"), list):
             logs = []
@@ -560,6 +642,7 @@ class PoopEverywherePlugin:
                     logs.append({
                         "event": item["event"],
                         "note": str(item.get("note") or ""),
+                        "notebook_root": str(item.get("notebook_root") or ""),
                         "count": int(item.get("count") or 0),
                         "time": str(item.get("time") or ""),
                         "tone": str(item.get("tone") or "info"),
@@ -589,15 +672,27 @@ class PoopEverywherePlugin:
     def save_state(self, bridge):
         self.safe_call(bridge, "host.storage.set", {"key": STORAGE_STATE, "value": self.state})
 
-    def append_log(self, event, note="", count=0, tone="success"):
+    def append_log(self, event, note="", count=0, tone="success", notebook_root=None):
+        nb = self.notebook_root if notebook_root is None else str(notebook_root)
         self.state["logs"].insert(0, {
             "event": event,
             "note": note,
+            "notebook_root": nb if note else "",
             "count": int(count),
             "time": now_hhmm(),
             "tone": tone,
         })
         self.state["logs"] = self.state["logs"][:20]
+
+    def register_open_target(self, notebook_root, rel_path):
+        if not notebook_root or not rel_path or not rel_path.endswith(".md"):
+            return ""
+        digest = hashlib.sha256(f"{notebook_root}\x00{rel_path}".encode("utf-8")).hexdigest()[:16]
+        action_id = f"open_target:{digest}"
+        if len(self.open_targets) >= 256 and action_id not in self.open_targets:
+            self.open_targets.pop(next(iter(self.open_targets)))
+        self.open_targets[action_id] = (notebook_root, rel_path)
+        return action_id
 
     def list_notebooks(self, bridge):
         res = self.safe_call(bridge, "host.notebooks.list", {})
@@ -621,16 +716,15 @@ class PoopEverywherePlugin:
     def count_markers(self, content):
         if not isinstance(content, str):
             return 0
-        return sum(1 for line in content.splitlines() if MARKER_LINE_RE.match(line))
+        return sum(1 for line, in_code in iter_markdown_lines(content) if not in_code and MARKER_LINE_RE.match(line))
 
     def strip_markers(self, content):
         if not isinstance(content, str):
             return "", 0
-        lines = content.splitlines(keepends=True)
         kept = []
         removed = 0
-        for line in lines:
-            if MARKER_LINE_RE.match(line):
+        for line, in_code in iter_markdown_lines(content):
+            if not in_code and MARKER_LINE_RE.match(line):
                 removed += 1
                 continue
             kept.append(line)
@@ -639,21 +733,25 @@ class PoopEverywherePlugin:
     def scan_notebook_markers(self, bridge):
         res = self.safe_call(bridge, "host.notes.list", {})
         if not isinstance(res, dict) or not isinstance(res.get("notes"), list):
-            return self.state["note_counts"]
+            return self.state["note_counts"], 0
         counts = {}
-        for item in res["notes"][:200]:
+        read_failures = 0
+        for item in res["notes"]:
             rel = item.get("path")
             if not isinstance(rel, str) or not rel:
                 continue
             try:
                 note = bridge.call_host("host.notes.read", {"path": rel})
             except HostRPCError:
+                read_failures += 1
+                if rel in self.state["note_counts"]:
+                    counts[rel] = self.state["note_counts"][rel]
                 continue
             n = self.count_markers(note.get("content", ""))
             if n > 0:
                 counts[rel] = n
         self.state["note_counts"] = counts
-        return counts
+        return counts, read_failures
 
     def active_counts_summary(self):
         counts = self.state.get("note_counts") or {}
@@ -662,7 +760,7 @@ class PoopEverywherePlugin:
         return total, notes
 
     def effective_caption(self):
-        raw = (self.config.get("caption") or "").strip()
+        raw = EMOJI_RE.sub("", (self.config.get("caption") or "")).strip()
         if raw and not (self.is_en() and CHINESE_RE.search(raw)):
             return raw
         return self.t()["default_caption"]
@@ -673,17 +771,17 @@ class PoopEverywherePlugin:
         style = self.config.get("style", "normal")
         repeat = {"shy": 1, "normal": 1, "wild": 3}.get(style, 1)
         if wrapped_text:
-            clean = " ".join(line.strip() for line in wrapped_text.splitlines() if line.strip())
-            return f"> [poop:wrap] {clean} ({caption})"
+            clean = EMOJI_RE.sub("", " ".join(line.strip() for line in wrapped_text.splitlines() if line.strip()))
+            return f"> [poop:wrap] {clean} ({caption}) {DROP_SIGNATURE}"
         lines = []
         for idx in range(repeat):
             suffix = f" #{idx + 1}" if repeat > 1 else ""
             if shape == "ribbon":
-                lines.append(f"> [poop:ribbon] --- {caption}{suffix} ---")
+                lines.append(f"> [poop:ribbon] --- {caption}{suffix} --- {DROP_SIGNATURE}")
             elif shape == "pellet":
-                lines.append(f"> [poop:pellet] . {caption}{suffix}")
+                lines.append(f"> [poop:pellet] . {caption}{suffix} {DROP_SIGNATURE}")
             else:
-                lines.append(f"> [poop:classic] {caption}{suffix}")
+                lines.append(f"> [poop:classic] {caption}{suffix} {DROP_SIGNATURE}")
         return "\n".join(lines)
 
     def sync_host_ui(self, bridge):
@@ -701,12 +799,11 @@ class PoopEverywherePlugin:
             "dark_glow": bool(self.config["bg_dark_glow"]),
         })
 
-        # 2. Titlebar button badge & active state
+        # 2. Titlebar button badge (active highlight is managed atomically by host panel state)
         badge_str = str(min(total, 999)) if total > 0 else ""
         self.safe_call(bridge, "host.titlebar.set_button", {
             "id": "poop-panel",
             "badge": badge_str,
-            "active": bool(self.panel_open),
         })
         self.safe_call(bridge, "host.titlebar.set_button", {
             "id": "drop-here",
@@ -765,13 +862,14 @@ class PoopEverywherePlugin:
             payload["label"] = label
         bridge.notify_host("host.action.progress", payload)
 
-    def resolve_target_note(self, bridge, explicit_note=""):
-        note = (explicit_note or "").strip()
-        if note:
-            return note
+    def resolve_target_note(self, bridge, explicit_note="", strict=False):
+        if isinstance(explicit_note, str) and explicit_note != "":
+            return explicit_note
+        if strict:
+            return ""
         res = self.safe_call(bridge, "host.notes.active", {})
-        if isinstance(res, dict) and isinstance(res.get("path"), str) and res["path"].strip():
-            return res["path"].strip()
+        if isinstance(res, dict) and isinstance(res.get("path"), str) and res["path"] != "":
+            return res["path"]
         listed = self.safe_call(bridge, "host.notes.list", {})
         if isinstance(listed, dict) and listed.get("notes"):
             return str(listed["notes"][0].get("path") or "")
@@ -857,9 +955,9 @@ class PoopEverywherePlugin:
 
         return self.drop_into_note_file(bridge, target, sel_text if wrap_selection and sel_text else "")
 
-    def flush_single_note(self, bridge, note_rel):
+    def flush_single_note(self, bridge, note_rel, strict=False):
         t = self.t()
-        target = self.resolve_target_note(bridge, note_rel)
+        target = self.resolve_target_note(bridge, note_rel, strict=strict)
         if not target:
             return False, "warning", t["toast_no_note"]
         try:
@@ -892,17 +990,19 @@ class PoopEverywherePlugin:
 
     def flush_all_notes(self, bridge):
         t = self.t()
-        self.scan_notebook_markers(bridge)
+        _, scan_read_failures = self.scan_notebook_markers(bridge)
         targets = sorted(self.state["note_counts"].keys())
         total_removed = 0
         touched_notes = 0
         conflicts = []
+        failed_count = scan_read_failures
         total_steps = max(len(targets), 1)
         for idx, rel in enumerate(targets, 1):
             self.report_progress(bridge, idx - 1, total_steps, t["progress_flush"])
             try:
                 read_res = bridge.call_host("host.notes.read", {"path": rel})
             except HostRPCError:
+                failed_count += 1
                 continue
             cleaned, removed = self.strip_markers(str(read_res.get("content") or ""))
             if removed <= 0:
@@ -919,26 +1019,38 @@ class PoopEverywherePlugin:
             except HostRPCError as exc:
                 if exc.code == -32006:
                     conflicts.append(rel)
+                else:
+                    failed_count += 1
             self.report_progress(bridge, idx, total_steps, t["progress_flush"])
 
-        was_bg_on = self.config["bg_enabled"]
-        if was_bg_on:
+        incomplete = bool(conflicts or failed_count > 0)
+        if not incomplete and self.config["bg_enabled"]:
             self.config["bg_enabled"] = False
             self.save_config(bridge)
         if total_removed > 0:
             self.state["total_flushed"] += total_removed
-            self.append_log("flush_all", count=total_removed, tone="info")
+            self.append_log("flush_all", count=total_removed, tone="warning" if incomplete else "info")
         self.save_state(bridge)
         self.sync_host_ui(bridge)
 
-        if conflicts:
-            return False, "warning", t["toast_conflict"].format(note=conflicts[0])
+        if incomplete:
+            if len(conflicts) == 1 and failed_count == 0 and total_removed == 0:
+                return False, "warning", t["toast_conflict"].format(note=conflicts[0])
+            return False, "warning", t["toast_flush_partial"].format(
+                n=total_removed, conflicts=len(conflicts), failed=failed_count
+            )
         if total_removed > 0:
             return True, "success", t["toast_flushed_all"].format(n=total_removed, notes=touched_notes)
         return True, "info", t["toast_nothing_flush"]
 
     def export_developer_guide(self):
-        out_dir = self.downloads_dir or self.data_dir or os.getcwd()
+        archive_dir = (self.config.get("archive_dir") or "").strip()
+        if archive_dir and os.path.isdir(archive_dir):
+            out_dir = archive_dir
+            dest_label = os.path.basename(archive_dir) or archive_dir
+        else:
+            out_dir = self.downloads_dir or self.data_dir or os.getcwd()
+            dest_label = "Downloads" if self.is_en() else "下载目录"
         os.makedirs(out_dir, exist_ok=True)
         filename = "block-poop-everywhere-guide-en.md" if self.is_en() else "block-poop-everywhere-guide.md"
         out_path = os.path.join(out_dir, filename)
@@ -973,7 +1085,7 @@ class PoopEverywherePlugin:
             lines.append(f"| `{key}` | `{perm}` |")
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-        return out_path
+        return out_path, dest_label
 
     def render_log_entry(self, entry):
         t = self.t()
@@ -1022,9 +1134,12 @@ class PoopEverywherePlugin:
             "status": status,
             "tone": tone,
         }
-        if note and note.endswith(".md") and "log_actions" in self.capabilities:
-            out["action_id"] = f"open_note:{note}"
-            out["tooltip"] = t["click_to_open"].format(note=note)
+        entry_nb = str(entry.get("notebook_root") or "")
+        if entry_nb and note and note.endswith(".md") and "log_actions" in self.capabilities:
+            act_id = self.register_open_target(entry_nb, note)
+            if act_id:
+                out["action_id"] = act_id
+                out["tooltip"] = t["click_to_open"].format(note=note)
         return out
 
     def build_preview_item(self):
@@ -1397,7 +1512,7 @@ class PoopEverywherePlugin:
                                 {"label": t["kv_version"], "value": PLUGIN_VERSION, "tooltip": PLUGIN_ID},
                                 {"label": t["kv_last"], "value": self.state["last_drop_at"] or t["kv_never"]},
                                 {"label": t["kv_points"], "value": t["kv_points_val"], "tooltip": "contributes + host.*"},
-                                {"label": t["kv_env"], "value": f"Block {self.host_version or '1.x'} ({self.locale})"},
+                                {"label": t["kv_env"], "value": f"Block {self.host_version or '1.x'} ({self.locale} / {self.host_theme})"},
                             ],
                         },
                         {
@@ -1405,7 +1520,7 @@ class PoopEverywherePlugin:
                             "id": "preview_mode",
                             "label": t["lbl_preview_mode"],
                             "value": self.config["preview_mode"],
-                            "options": [{"value": v, "label": t["preview_modes"][v]} for v in PREVIEW_MODES[:3]],
+                            "options": [{"value": v, "label": t["preview_modes"][v]} for v in PREVIEW_MODES],
                         },
                         self.build_preview_item(),
                         {
@@ -1511,8 +1626,10 @@ class PoopEverywherePlugin:
                 "ratio": min(1.0, max(0.08, cnt / max_cnt)),
                 "tooltip": t["click_to_open"].format(note=rel),
             }
-            if "log_actions" in self.capabilities:
-                row["action_id"] = f"open_note:{rel}"
+            if "log_actions" in self.capabilities and self.notebook_root:
+                act_id = self.register_open_target(self.notebook_root, rel)
+                if act_id:
+                    row["action_id"] = act_id
             note_rows.append(row)
 
         return {
@@ -1570,8 +1687,10 @@ class PoopEverywherePlugin:
                 "tone": "warning" if cnt >= 5 else "accent",
                 "tooltip": t["click_to_open"].format(note=rel),
             }
-            if "log_actions" in self.capabilities:
-                item["action_id"] = f"open_note:{rel}"
+            if "log_actions" in self.capabilities and self.notebook_root:
+                act_id = self.register_open_target(self.notebook_root, rel)
+                if act_id:
+                    item["action_id"] = act_id
             entries.append(item)
         return {
             "title": t["sidebar_title"],
@@ -1598,8 +1717,11 @@ class PoopEverywherePlugin:
             ],
         }
 
-    def render_flush_dialog(self):
+    def render_flush_dialog(self, mint_token=True):
         t = self.t()
+        if mint_token:
+            self.pending_flush_token = secrets.token_hex(8)
+            self.pending_flush_nb = self.notebook_root
         total, notes = self.active_counts_summary()
         bg_state = t["bg_state_on"] if self.config["bg_enabled"] else t["bg_state_off"]
         items = [
@@ -1654,7 +1776,6 @@ class PoopEverywherePlugin:
         if surface == SURFACE_APPEARANCE:
             return self.render_appearance_section()
         if surface == SURFACE_PANEL:
-            self.panel_open = True
             return self.render_panel()
         if surface == SURFACE_SIDEBAR:
             return self.render_sidebar_section()
@@ -1662,12 +1783,16 @@ class PoopEverywherePlugin:
             return self.render_flush_dialog()
         raise ValueError(self.t()["err_unknown_surface"].format(surface=surface))
 
-    def handle_open_note_action(self, bridge, rel_path, surface):
+    def handle_open_target_action(self, bridge, action_id, surface):
         t = self.t()
+        target = self.open_targets.get(action_id)
+        if not target:
+            return {"ok": False, "tone": "warning", "status": t["toast_open_missing"]}
+        nb_root, rel_path = target
         self.state["sidebar_hits"] += 1
         self.save_state(bridge)
         try:
-            res = bridge.call_host("host.notes.open", {"path": rel_path})
+            res = bridge.call_host("host.notes.open", {"notebook_root": nb_root, "path": rel_path})
             if isinstance(res, dict) and res.get("ok"):
                 msg = t["toast_opened_note"].format(note=rel_path)
                 return {"ok": True, "tone": "info", "status": msg, "page": self.render_surface(bridge, surface)}
@@ -1721,8 +1846,8 @@ class PoopEverywherePlugin:
 
     def handle_action(self, bridge, surface, action_id, values):
         t = self.t()
-        if action_id.startswith("open_note:"):
-            return self.handle_open_note_action(bridge, action_id[len("open_note:"):], surface)
+        if action_id.startswith("open_target:"):
+            return self.handle_open_target_action(bridge, action_id, surface)
 
         if action_id in ("drop_now", "panel_drop", "sidebar_drop"):
             ok, tone, msg = self.drop_at_editor_or_note(bridge, source=surface)
@@ -1750,7 +1875,10 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "demo_toasts":
-            self.show_toast(bridge, t["toast_demo_1"], "success")
+            self.show_toast(bridge, t["toast_demo_info"], "info")
+            self.show_toast(bridge, t["toast_demo_success"], "success")
+            self.show_toast(bridge, t["toast_demo_warning"], "warning")
+            self.show_toast(bridge, t["toast_demo_error"], "error")
             return {
                 "ok": True,
                 "tone": "info",
@@ -1772,11 +1900,11 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "export_guide":
-            out_path = self.export_developer_guide()
+            out_path, dest_label = self.export_developer_guide()
             return {
                 "ok": True,
                 "tone": "success",
-                "status": t["toast_exported"],
+                "status": t["toast_exported"].format(dest=dest_label),
                 "reveal_path": out_path,
                 "page": self.render_surface(bridge, surface),
             }
@@ -1784,14 +1912,16 @@ class PoopEverywherePlugin:
         if action_id in ("open_flush", "panel_open_flush"):
             self.state["dialog_opens"] += 1
             self.save_state(bridge)
+            self.pending_flush_token = secrets.token_hex(8)
+            self.pending_flush_nb = self.notebook_root
             opened = self.safe_call(bridge, "host.ui.open_dialog", {"id": "flush-confirm"})
             if opened is None:
-                ok, tone, msg = self.flush_all_notes(bridge)
-                self.refresh_other_surfaces(bridge, surface)
+                self.pending_flush_token = ""
+                self.pending_flush_nb = ""
                 return {
-                    "ok": ok,
-                    "tone": tone,
-                    "status": msg,
+                    "ok": False,
+                    "tone": "warning",
+                    "status": t["toast_dialog_unavailable"],
                     "page": self.render_surface(bridge, surface),
                 }
             return {"ok": True, "tone": "info", "status": t["dialog_title"], "page": self.render_surface(bridge, surface)}
@@ -1839,25 +1969,36 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "dialog_keep":
+            self.pending_flush_token = ""
+            self.pending_flush_nb = ""
             self.safe_call(bridge, "host.ui.close_dialog", {"id": "flush-confirm"})
-            return {"ok": True, "tone": "info", "status": t["toast_kept"], "page": self.render_surface(bridge, surface)}
+            return {"ok": True, "tone": "info", "status": t["toast_kept"], "page": self.render_flush_dialog(mint_token=False)}
 
         if action_id == "dialog_flush_confirm":
+            if not self.pending_flush_token or self.pending_flush_nb != self.notebook_root:
+                return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_flush_dialog(mint_token=False)}
             secret = self.config.get("flush_secret") or ""
             if secret and str(values.get("confirm_secret") or "") != secret:
-                return {"ok": False, "tone": "danger", "status": t["toast_wrong_secret"], "page": self.render_surface(bridge, surface)}
+                return {"ok": False, "tone": "danger", "status": t["toast_wrong_secret"], "page": self.render_flush_dialog(mint_token=False)}
+            self.pending_flush_token = ""
+            self.pending_flush_nb = ""
             ok, tone, msg = self.flush_all_notes(bridge)
-            self.safe_call(bridge, "host.ui.close_dialog", {"id": "flush-confirm"})
+            if ok:
+                self.safe_call(bridge, "host.ui.close_dialog", {"id": "flush-confirm"})
+                page = self.render_flush_dialog(mint_token=False)
+            else:
+                # Keep dialog open with a fresh token so the user can retry after fixing conflicts.
+                page = self.render_flush_dialog(mint_token=True)
             self.show_toast(bridge, msg, tone)
             self.refresh_other_surfaces(bridge, surface)
-            return {"ok": ok, "tone": tone, "status": msg, "page": self.render_surface(bridge, surface)}
+            return {"ok": ok, "tone": tone, "status": msg, "page": page}
 
         raise ValueError(t["err_unknown_action"].format(action=action_id))
 
     def handle_command(self, bridge, cmd_id, ctx):
         t = self.t()
-        note = str(ctx.get("note") or "")
-        selection = str(ctx.get("selection") or "")
+        note = ctx.get("note") if isinstance(ctx.get("note"), str) else ""
+        selection = ctx.get("selection") if isinstance(ctx.get("selection"), str) else ""
         source = str(ctx.get("source") or "")
 
         if cmd_id == "drop_here":
@@ -1871,8 +2012,9 @@ class PoopEverywherePlugin:
             return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
 
         if cmd_id == "toggle_panel":
-            self.panel_open = not self.panel_open
-            self.safe_call(bridge, "host.ui.open_panel" if self.panel_open else "host.ui.close_panel", {"id": "poop-board"})
+            res = self.safe_call(bridge, "host.ui.toggle_panel", {"id": "poop-board"})
+            if res is None:
+                self.safe_call(bridge, "host.ui.open_panel", {"id": "poop-board"})
             self.sync_host_ui(bridge)
             return {"ok": True}
 
@@ -1888,26 +2030,36 @@ class PoopEverywherePlugin:
             return {"ok": True, "tone": "info", "status": msg, "show_plugin_icon": True}
 
         if cmd_id == "drop_in_note":
-            target = self.resolve_target_note(bridge, note)
+            strict = source == "sidebar_menu"
+            target = self.resolve_target_note(bridge, note, strict=strict)
+            if not target:
+                return {"ok": False, "tone": "warning", "status": t["toast_no_note"], "show_plugin_icon": True}
             if not self.is_active_notebook_allowed(bridge):
-                self.append_log("blocked", note=target or "notebook", tone="danger")
+                self.append_log("blocked", note=target, tone="danger")
                 self.save_state(bridge)
                 return {"ok": False, "tone": "error", "status": t["toast_blocked_nb"], "show_plugin_icon": True}
-            if source == "sidebar_menu":
+            if strict:
                 self.state["sidebar_hits"] += 1
             ok, tone, msg = self.drop_into_note_file(bridge, target)
             self.refresh_other_surfaces(bridge)
             return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
 
         if cmd_id == "flush_note":
-            ok, tone, msg = self.flush_single_note(bridge, note)
+            strict = source == "sidebar_menu"
+            ok, tone, msg = self.flush_single_note(bridge, note, strict=strict)
             self.refresh_other_surfaces(bridge)
             return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
 
         if cmd_id == "open_flush_dialog":
             self.state["dialog_opens"] += 1
             self.save_state(bridge)
-            self.safe_call(bridge, "host.ui.open_dialog", {"id": "flush-confirm"})
+            self.pending_flush_token = secrets.token_hex(8)
+            self.pending_flush_nb = self.notebook_root
+            opened = self.safe_call(bridge, "host.ui.open_dialog", {"id": "flush-confirm"})
+            if opened is None:
+                self.pending_flush_token = ""
+                self.pending_flush_nb = ""
+                return {"ok": False, "tone": "warning", "status": t["toast_dialog_unavailable"], "show_plugin_icon": True}
             return {"ok": True}
 
         raise ValueError(t["err_unknown_command"].format(cmd=cmd_id))
@@ -1915,7 +2067,7 @@ class PoopEverywherePlugin:
     def handle_event(self, bridge, params):
         ev = str(params.get("event") or "")
         if ev == "note.saved":
-            rel = str(params.get("path") or "")
+            rel = params.get("path") if isinstance(params.get("path"), str) else ""
             nb_root = str(params.get("notebook_root") or "")
             if rel and (not nb_root or not self.notebook_root or os.path.normpath(nb_root) == os.path.normpath(self.notebook_root)):
                 try:
@@ -1934,10 +2086,14 @@ class PoopEverywherePlugin:
             return {"handled": True}
 
         if ev == "theme.changed":
-            self.dark_theme = bool(params.get("dark"))
+            if isinstance(params.get("theme"), str) and params["theme"].strip():
+                self.host_theme = params["theme"].strip()
+            elif "tarot" in params:
+                self.host_theme = "tarot" if params.get("tarot") else "system"
             self.append_log("theme", tone="info")
             self.save_state(bridge)
             self.sync_host_ui(bridge)
+            self.refresh_other_surfaces(bridge)
             return {"handled": True}
 
         if ev == "locale.changed":
