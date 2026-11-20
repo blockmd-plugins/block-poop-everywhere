@@ -240,6 +240,8 @@ jobs:
                   ">   > [poop:classic] bq list fence <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] bq tab fence <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] custom html7 <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] heading html7 <!-- block-poop-everywhere:drop -->",
+                  ">     > [poop:classic] bq heading indented <!-- block-poop-everywhere:drop -->",
               ]
               notes = {
                   NOTE_NAME: (
@@ -253,12 +255,15 @@ jobs:
                       "> - ```md\n" + protected_samples[6] + "\n>   ```\n\n"
                       ">\t ```md\n" + protected_samples[7] + "\n> ```\n\n"
                       "<custom>\n" + protected_samples[8] + "\n\n"
+                      "# HeadingBeforeCustom\n<custom>\n" + protected_samples[9] + "\n\n"
+                      "> # HeadingInsideBQ\n" + protected_samples[10] + "\n\n"
                       "Hello Block.\n"
                   ),
                   " A.md": "# Leading Space Note\n",
                   "A.md": "# Normal Note\n",
                   "Notes.MD": "# Uppercase Extension\n",
                   "Extra.markdown": "# Markdown Extension\n",
+                  "NoEOL.md": "A",
                   "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
               }
               storage = {}
@@ -471,10 +476,10 @@ jobs:
                       res_unwrap = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
                       require(res_unwrap.get("ok") is True and notes["WrapTarget.md"] == before_wrap,
                               f"{locale}: wrap->flush round-trip altered user text: {notes['WrapTarget.md']!r} != {before_wrap!r}")
-                      # Regression: legacy [poop:classic] markers from v1.0.0/v1.0.1 are still cleanly flushed.
+                      # Regression: legacy [poop:classic] markers from v1.0.0/v1.0.1 are still cleanly flushed without swallowing user blank lines.
                       notes["A.md"] = "# Normal Note\n\n> [poop:classic] legacy drop <!-- block-poop-everywhere:drop -->\n"
                       res_leg = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "A.md", "source": "sidebar_menu"}})
-                      require(res_leg.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"] and notes["A.md"] == "# Normal Note\n",
+                      require(res_leg.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"] and notes["A.md"] == "# Normal Note\n\n",
                               f"{locale}: legacy drop flush failed: {notes['A.md']!r}")
                       # Regression: sidebar_menu preserves leading space and never touches wrong note or falls back.
                       res_space = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": " A.md", "source": "sidebar_menu"}})
@@ -553,7 +558,19 @@ jobs:
                       active_note_state["path"] = NOTE_NAME
                       require(no_active_flush.get("ok") is False and "block-poop-everywhere:drop" in notes[" A.md"],
                               f"{locale}: panel_flush_page modified unrelated note when active note was empty")
-                      # Real host-bound dialog open -> stale token / wrong surface / missing token all rejected -> current token succeeds -> replay rejected.
+                      # Regression: file append on note without trailing LF round-trips byte-for-byte on flush.
+                      no_eol_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": "NoEOL.md"}})
+                      require(no_eol_drop.get("ok") is True, f"{locale}: NoEOL.md sidebar drop failed: {no_eol_drop}")
+                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB) must be refused without mutating note.
+                      for bad_sel in ("\nA\r", "A\n\n\n\nB"):
+                          before_wrap = notes["WrapTarget.md"]
+                          bad_wrap = rpc("plugin.command", {
+                              "command_id": "poopify_selection",
+                              "context": {"source": "editor_menu", "note": "WrapTarget.md", "selection": bad_sel},
+                          })
+                          require(bad_wrap.get("ok") is False and notes["WrapTarget.md"] == before_wrap,
+                                  f"{locale}: unsafe selection {bad_sel!r} should be refused without mutation: {bad_wrap}")
+                      # Real host-bound dialog open -> stale/padded/missing/wrong-surface tokens all rejected -> current token succeeds -> replay rejected.
                       open_dlg_1 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
                       require(open_dlg_1.get("ok") is True, f"{locale}: open_flush_dialog #1 failed: {open_dlg_1}")
                       tok1 = dialog_mode["token"]
@@ -563,6 +580,8 @@ jobs:
                       require(tok1 != tok2, f"{locale}: expected fresh dialog token")
                       bad_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
                       require(bad_tok.get("ok") is False, f"{locale}: stale dialog_token {tok1} must be rejected after {tok2}")
+                      padded_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": f" {tok2} "})
+                      require(padded_tok.get("ok") is False, f"{locale}: whitespace-padded dialog_token must be rejected")
                       missing_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
                       require(missing_tok.get("ok") is False, f"{locale}: missing dialog_token must be rejected")
                       wrong_surf = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "panel:poop-board", "values": {}, "dialog_token": tok2})
@@ -574,6 +593,7 @@ jobs:
                       # Regression: all CommonMark protected containers + U+2028 MUST survive flush byte-for-byte.
                       for sample in protected_samples:
                           require(sample in notes[NOTE_NAME], f"{locale}: flush corrupted protected sample: {sample!r}")
+                      require(notes["NoEOL.md"] == "A", f"{locale}: NoEOL.md did not round-trip byte-for-byte: {notes['NoEOL.md']!r}")
                       require("block-poop-everywhere:drop" not in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["Notes.MD"],
                               f"{locale}: flush left top-level plugin markers behind")
                   require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
