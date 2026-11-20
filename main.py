@@ -46,8 +46,13 @@ STORAGE_STATE = "runtime_state"
 
 DROP_SIGNATURE = "<!-- block-poop-everywhere:drop -->"
 MARKER_LINE_RE = re.compile(
-    r"^[ ]{0,3}>[ ]?\[poop:([a-z0-9_-]+)\](?:[^\r\n\u2028\u2029]*?)<!--\s*block-poop-everywhere:drop\s*-->[ \t]*(?:\r\n|\r|\n)?$"
+    r"^[ ]{0,3}>[ ]?(?:\[poop:([a-z0-9_-]+)\])?(?:[^\r\n\u2028\u2029]*?)"
+    r"<!--\s*block-poop-everywhere:drop(?::([a-z0-9_-]+))?\s*-->[ \t]*(?:\r\n|\r|\n)?$"
 )
+
+
+def drop_sig(kind):
+    return f"<!-- block-poop-everywhere:drop:{kind} -->"
 FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 HTML_TYPE1_OPEN_RE = re.compile(r"^[ ]{0,3}<(pre|script|style|textarea)(?:[\s>]|$)", re.I)
 HTML_TYPE1_CLOSE_RE = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
@@ -305,7 +310,7 @@ STRINGS = {
         "act_save": "Save Settings",
         "act_demo_toast": "Preview 4 Toasts",
         "act_rescan": "Rescan Notes",
-        "act_toggle_bg": "Toggle Backdrop",
+        "act_toggle_bg": "Backdrop",
         "act_apply_bg": "Apply Backdrop",
         "act_reset_bg": "Reset Backdrop",
         "act_keep": "Keep for Now",
@@ -1019,19 +1024,47 @@ class PoopEverywherePlugin:
         kept = []
         removed = 0
         in_wrap = False
+        eat_next_blank = False
+        prev_removed_drop = False
+        pending_bq_sep = False
         for line, eligible in iter_markdown_lines(content):
+            if eat_next_blank:
+                eat_next_blank = False
+                if line in ("\n", "\r\n", "\r"):
+                    continue
             if eligible:
                 m = MARKER_LINE_RE.match(line)
                 if m:
-                    kind = m.group(1)
+                    kind = m.group(2) or m.group(1) or "classic"
                     if kind == "wrap-start":
                         in_wrap = True
+                        eat_next_blank = True
+                        prev_removed_drop = False
+                        pending_bq_sep = False
                     elif kind == "wrap-end":
-                        if in_wrap and not line.endswith(("\n", "\r")) and kept and kept[-1].endswith("\n"):
-                            kept[-1] = kept[-1][:-1]
+                        if in_wrap:
+                            if kept and kept[-1] in ("\n", "\r\n", "\r"):
+                                kept.pop()
+                            if not line.endswith(("\n", "\r")) and kept and kept[-1].endswith("\n"):
+                                kept[-1] = kept[-1][:-1]
                         in_wrap = False
+                        eat_next_blank = False
+                        prev_removed_drop = False
+                        pending_bq_sep = False
+                    else:
+                        if pending_bq_sep and kept:
+                            kept.pop()
+                        elif len(kept) >= 2 and kept[-1] in ("\n", "\r\n", "\r"):
+                            kept.pop()
+                        prev_removed_drop = True
+                        pending_bq_sep = False
                     removed += 1
                     continue
+            if prev_removed_drop and not pending_bq_sep and line.rstrip("\r\n").strip(" \t") == ">":
+                pending_bq_sep = True
+            else:
+                prev_removed_drop = False
+                pending_bq_sep = False
             kept.append(line)
         return "".join(kept), removed
 
@@ -1084,22 +1117,22 @@ class PoopEverywherePlugin:
         repeat = {"shy": 1, "normal": 1, "wild": 3}.get(style, 1)
         if wrapped_text:
             if wrapped_text.endswith("\r\n"):
-                return f"> [poop:wrap-start] {caption} {DROP_SIGNATURE}\r\n{wrapped_text}> [poop:wrap-end] {DROP_SIGNATURE}\r\n"
+                return f"> {caption}{drop_sig('wrap-start')}\r\n\r\n{wrapped_text}\r\n> ···{drop_sig('wrap-end')}\r\n"
             if wrapped_text.endswith("\n"):
-                return f"> [poop:wrap-start] {caption} {DROP_SIGNATURE}\n{wrapped_text}> [poop:wrap-end] {DROP_SIGNATURE}\n"
+                return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\n> ···{drop_sig('wrap-end')}\n"
             if wrapped_text.endswith("\r"):
-                return f"> [poop:wrap-start] {caption} {DROP_SIGNATURE}\r{wrapped_text}> [poop:wrap-end] {DROP_SIGNATURE}\r"
-            return f"> [poop:wrap-start] {caption} {DROP_SIGNATURE}\n{wrapped_text}\n> [poop:wrap-end] {DROP_SIGNATURE}"
+                return f"> {caption}{drop_sig('wrap-start')}\r\r{wrapped_text}\r> ···{drop_sig('wrap-end')}\r"
+            return f"> {caption}{drop_sig('wrap-start')}\n\n{wrapped_text}\n\n> ···{drop_sig('wrap-end')}"
         lines = []
         for idx in range(repeat):
             suffix = f" #{idx + 1}" if repeat > 1 else ""
             if shape == "ribbon":
-                lines.append(f"> [poop:ribbon] --- {caption}{suffix} --- {DROP_SIGNATURE}")
+                lines.append(f"> --- {caption}{suffix} ---{drop_sig('ribbon')}")
             elif shape == "pellet":
-                lines.append(f"> [poop:pellet] . {caption}{suffix} {DROP_SIGNATURE}")
+                lines.append(f"> · {caption}{suffix} ·{drop_sig('pellet')}")
             else:
-                lines.append(f"> [poop:classic] {caption}{suffix} {DROP_SIGNATURE}")
-        return "\n".join(lines)
+                lines.append(f"> {caption}{suffix}{drop_sig('classic')}")
+        return "\n\n".join(lines)
 
     def sync_host_ui(self, bridge):
         t = self.t()
@@ -1520,12 +1553,12 @@ class PoopEverywherePlugin:
         if mode == "plan":
             body = (
                 f"1. Scan {max(notes, 1)} note(s) via host.notes.read\n"
-                f"2. Strip {total} [poop:*] line(s) using expected_revision\n"
+                f"2. Strip {total} signed drop line(s) using expected_revision\n"
                 "3. Clear sidebar badges, titlebar badge, and backdrop\n"
                 "4. Sync status bar and notify with icon toast"
             ) if self.is_en() else (
                 f"1. 通过 host.notes.read 扫描 {max(notes, 1)} 篇笔记\n"
-                f"2. 携带 expected_revision 精确移除 {total} 条 [poop:*] 标记行\n"
+                f"2. 携带 expected_revision 精确移除 {total} 条专属标记行\n"
                 "3. 清空文件树角标、顶栏角标与编辑区背景\n"
                 "4. 同步状态栏并弹出带图标 Toast"
             )
