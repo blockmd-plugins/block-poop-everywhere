@@ -247,6 +247,11 @@ jobs:
                   "> [poop:classic] nested lazy bare cont <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] code span lazy cont <!-- block-poop-everywhere:drop -->",
                   "> [poop:classic] code span ord2 <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] refdef list2 <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] nested ord2 lazy <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] bq list lazy <!-- block-poop-everywhere:drop -->",
+                  "> [poop:classic] nested bq list lazy <!-- block-poop-everywhere:drop -->",
+                  "> example \\<!-- block-poop-everywhere:drop -->",
               ]
               notes = {
                   NOTE_NAME: (
@@ -267,6 +272,11 @@ jobs:
                       "> > nested bare\nlazy bare line\n" + protected_samples[13] + "\n\n"
                       "> span `open\nlazy line inside span\n" + protected_samples[14] + "\n> close`\n\n"
                       "> span `open2\n> 2. not a list\n" + protected_samples[15] + "\n> close2`\n\n"
+                      "[r]: /url\n2. item\n   " + protected_samples[16] + "\n\n"
+                      "> > A\n> > 2. x\n" + protected_samples[17] + "\n\n"
+                      "> - A\n" + protected_samples[18] + "\n\n"
+                      "> > - A\n" + protected_samples[19] + "\n\n"
+                      + protected_samples[20] + "\n\n"
                       "Hello Block.\n"
                   ),
                   "BOMFence.md": "\ufeff```md\n> [poop:classic] bom fence <!-- block-poop-everywhere:drop -->\n```\n",
@@ -277,6 +287,8 @@ jobs:
                   "NoEOL.md": "A",
                   "OnlyLF.md": "\n",
                   "MixedEOL.md": "A\n\r\n",
+                  "LegacyWrap1.md": "> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n\nA\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->",
+                  "LegacyWrap2.md": "> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n>\n> A\n>\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->",
                   "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
               }
               storage = {}
@@ -575,8 +587,8 @@ jobs:
                       for special_note in ("NoEOL.md", "OnlyLF.md", "MixedEOL.md"):
                           sp_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": special_note}})
                           require(sp_drop.get("ok") is True, f"{locale}: {special_note} sidebar drop failed: {sp_drop}")
-                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB, > A\n\n> B) must be refused without mutating note.
-                      for bad_sel in ("\nA\r", "A\n\n\n\nB", "> A\n\n> B"):
+                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB, > A\n\n> B, > A\nlazy, > A\nlazy\n\n> B) must be refused without mutating note.
+                      for bad_sel in ("\nA\r", "A\n\n\n\nB", "> A\n\n> B", "> A\nlazy", "> A\nlazy\n\n> B"):
                           before_wrap = notes["WrapTarget.md"]
                           bad_wrap = rpc("plugin.command", {
                               "command_id": "poopify_selection",
@@ -584,7 +596,16 @@ jobs:
                           })
                           require(bad_wrap.get("ok") is False and notes["WrapTarget.md"] == before_wrap,
                                   f"{locale}: unsafe selection {bad_sel!r} should be refused without mutation: {bad_wrap}")
-                      # Real host-bound dialog open -> stale/padded/missing/wrong-surface tokens all rejected -> current token succeeds -> replay rejected.
+                      # Regression: custom Markdown-opener / backslash / backtick captions stay countable and cleanly flushable.
+                      for bad_cap in ("# Heading", "- bullet", "foo\\", "foo `tick"):
+                          rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"caption": bad_cap}})
+                          cap_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": "A.md"}})
+                          require(cap_drop.get("ok") is True, f"{locale}: drop failed for caption {bad_cap!r}")
+                          cap_flush = rpc("plugin.command", {"command_id": "flush_note", "context": {"source": "sidebar_menu", "note": "A.md"}})
+                          require(cap_flush.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"],
+                                  f"{locale}: flush left marker for caption {bad_cap!r}: {notes['A.md']!r}")
+                      rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"caption": ""}})
+                      # Real host-bound dialog open -> stale/padded/missing/wrong-surface tokens all rejected (confirm & keep) -> current token succeeds -> replay rejected.
                       open_dlg_1 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
                       require(open_dlg_1.get("ok") is True, f"{locale}: open_flush_dialog #1 failed: {open_dlg_1}")
                       tok1 = dialog_mode["token"]
@@ -592,6 +613,10 @@ jobs:
                       require(open_dlg_2.get("ok") is True, f"{locale}: open_flush_dialog #2 failed: {open_dlg_2}")
                       tok2 = dialog_mode["token"]
                       require(tok1 != tok2, f"{locale}: expected fresh dialog token")
+                      stale_keep = rpc("plugin.action", {"action_id": "dialog_keep", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
+                      require(stale_keep.get("ok") is False, f"{locale}: stale dialog_keep {tok1} must be rejected without revoking {tok2}")
+                      wrong_surf_keep = rpc("plugin.action", {"action_id": "dialog_keep", "surface": "panel:poop-board", "values": {}, "dialog_token": tok2})
+                      require(wrong_surf_keep.get("ok") is False, f"{locale}: non-dialog dialog_keep must be rejected")
                       bad_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
                       require(bad_tok.get("ok") is False, f"{locale}: stale dialog_token {tok1} must be rejected after {tok2}")
                       padded_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": f" {tok2} "})
@@ -610,9 +635,47 @@ jobs:
                       require(notes["NoEOL.md"] == "A", f"{locale}: NoEOL.md did not round-trip byte-for-byte: {notes['NoEOL.md']!r}")
                       require(notes["OnlyLF.md"] == "\n", f"{locale}: OnlyLF.md did not round-trip byte-for-byte: {notes['OnlyLF.md']!r}")
                       require(notes["MixedEOL.md"] == "A\n\r\n", f"{locale}: MixedEOL.md did not round-trip byte-for-byte: {notes['MixedEOL.md']!r}")
+                      require(notes["LegacyWrap1.md"] == "\nA\n", f"{locale}: LegacyWrap1.md did not round-trip byte-for-byte: {notes['LegacyWrap1.md']!r}")
+                      require(notes["LegacyWrap2.md"] == ">\n> A\n>\n", f"{locale}: LegacyWrap2.md did not round-trip byte-for-byte: {notes['LegacyWrap2.md']!r}")
                       require("bom fence" in notes["BOMFence.md"], f"{locale}: flush corrupted UTF-8 BOM fenced code block")
                       require("block-poop-everywhere:drop" not in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["Notes.MD"],
                               f"{locale}: flush left top-level plugin markers behind")
+                      # Regression: interleaved plugin.shutdown arriving while plugin awaits a host RPC is queued and answered cleanly.
+                      request_id += 1
+                      cmd_req_id = request_id
+                      send({"id": cmd_req_id, "method": "plugin.action", "params": {"action_id": "rescan_notes", "surface": "settings_page", "values": {}}})
+                      request_id += 1
+                      shut_req_id = request_id
+                      interleaved_sent = False
+                      got_cmd = False
+                      got_shut = False
+                      while not (got_cmd and got_shut):
+                          try:
+                              line = replies.get(timeout=10)
+                          except Empty:
+                              raise ValueError(f"{locale}/{layout}: timed out awaiting interleaved shutdown") from None
+                          require(line is not None, f"{locale}/{layout}: plugin exited prematurely during interleaved shutdown")
+                          message = json.loads(line)
+                          if "method" in message:
+                              if not interleaved_sent:
+                                  send({"id": shut_req_id, "method": "plugin.shutdown", "params": {}})
+                                  interleaved_sent = True
+                              result = host(message["method"], message.get("params", {}))
+                              if "id" in message:
+                                  if isinstance(result, dict) and "__rpc_error__" in result:
+                                      send({"id": message["id"], "error": result["__rpc_error__"]})
+                                  else:
+                                      send({"id": message["id"], "result": result})
+                              continue
+                          if message.get("id") == cmd_req_id:
+                              require("error" not in message and message["result"].get("ok") is True, f"{locale}: interleaved rescan failed: {message}")
+                              got_cmd = True
+                          elif message.get("id") == shut_req_id:
+                              require("error" not in message and message["result"].get("ok") is True, f"{locale}: interleaved shutdown failed: {message}")
+                              got_shut = True
+                      require(interleaved_sent, f"{locale}: rescan_notes did not issue host RPC")
+                      require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully after interleaved shutdown")
+                      return pages_by_surface
                   require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
                   require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully")
                   return pages_by_surface
@@ -629,6 +692,16 @@ jobs:
               for py_path in sorted(pkg_dir.rglob("*.py")):
                   if py_path.is_file():
                       compile(py_path.read_bytes(), str(py_path), "exec")
+
+              # Regression: split_md_lines stays O(N) on large LF-only files.
+              import importlib.util, time as _time
+              _spec = importlib.util.spec_from_file_location("_poop_perf_check", str(pkg_dir / "main.py"))
+              _mod = importlib.util.module_from_spec(_spec)
+              _spec.loader.exec_module(_mod)
+              _t0 = _time.perf_counter()
+              _big_lines = _mod.split_md_lines("hello line\n" * 160_000)
+              _dt = _time.perf_counter() - _t0
+              require(len(_big_lines) == 160_000 and _dt < 2.0, f"split_md_lines performance regression: {_dt:.2f}s")
 
               manifest_path = pkg_dir / "manifest.json"
               require(not os.path.islink(manifest_path) and manifest_path.is_file(), "Staged package missing manifest.json")

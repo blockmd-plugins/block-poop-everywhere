@@ -11,6 +11,7 @@ Demonstrates every Block plugin extension point and declarative UI control:
 - Optimistic note read/write, note opening, live progress, save & workspace hooks
 """
 
+import collections
 import datetime
 import hashlib
 import json
@@ -25,7 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.7"
+PLUGIN_VERSION = "1.0.8"
 
 SURFACE_SETTINGS = "settings_page"
 SURFACE_APPEARANCE = "settings_section:poop-appearance"
@@ -46,9 +47,25 @@ STORAGE_STATE = "runtime_state"
 
 DROP_SIGNATURE = "<!-- block-poop-everywhere:drop -->"
 MARKER_LINE_RE = re.compile(
-    r"^[ ]{0,3}>[ ]?(?:\[poop:([a-z0-9_-]+)\])?(?:[^\r\n\u2028\u2029]*?)"
-    r"<!--\s*block-poop-everywhere:drop(?::([a-z0-9_-]+))?(?::([a-z0-9_=,-]+))?\s*-->[ \t]*(?:\r\n|\r|\n)?$"
+    r"^[ ]{0,3}>[ ]?(?:\[poop:(?P<legacy>[a-z0-9_-]+)\])?(?:[^\r\n\u2028\u2029]*?)"
+    r"(?P<sig><!--\s*block-poop-everywhere:drop(?::(?P<kind>[a-z0-9_-]+))?(?::(?P<meta>[a-z0-9_=,-]+))?\s*-->)[ \t]*(?:\r\n|\r|\n)?$"
 )
+
+
+def match_marker_line(line):
+    """Match a plugin drop line, rejecting backslash-escaped HTML comments (CommonMark §2.4)."""
+    m = MARKER_LINE_RE.match(line)
+    if not m:
+        return None
+    sig_pos = m.start("sig")
+    bs = 0
+    j = sig_pos - 1
+    while j >= 0 and line[j] == "\\":
+        bs += 1
+        j -= 1
+    if bs % 2 == 1:
+        return None
+    return m
 
 
 def drop_sig(kind, meta=""):
@@ -484,6 +501,7 @@ class HostRPCError(RuntimeError):
 class HostBridge:
     def __init__(self):
         self._seq = 1000
+        self._deferred = collections.deque()
 
     def send(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -504,34 +522,49 @@ class HostBridge:
             if not line:
                 continue
             msg = json.loads(line)
+            if "method" in msg:
+                self._deferred.append(msg)
+                continue
             if str(msg.get("id")) == req_id:
                 if msg.get("error"):
                     err = msg["error"]
                     raise HostRPCError(int(err.get("code", -32000)), str(err.get("message", "host error")))
                 return msg.get("result", {})
 
-    def serve(self, handler, localize_error):
+    def _next_request(self):
+        if self._deferred:
+            return self._deferred.popleft()
         while True:
             line = sys.stdin.readline()
             if not line:
-                break
+                return None
             line = line.strip()
             if not line:
                 continue
-            req = json.loads(line)
+            return json.loads(line)
+
+    def serve(self, handler, localize_error):
+        while True:
+            req = self._next_request()
+            if req is None:
+                break
             method = req.get("method")
+            if not method:
+                continue
             req_id = req.get("id")
             try:
                 result = handler(self, method, req.get("params") or {})
-                self.send({"jsonrpc": "2.0", "id": req_id, "result": result})
+                if req_id is not None:
+                    self.send({"jsonrpc": "2.0", "id": req_id, "result": result})
                 if method == "plugin.shutdown":
                     break
             except Exception as exc:
-                self.send({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32000, "message": localize_error(str(exc))},
-                })
+                if req_id is not None:
+                    self.send({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32000, "message": localize_error(str(exc))},
+                    })
 
 
 def now_hhmm():
@@ -552,15 +585,19 @@ def is_markdown_path(path):
 
 
 def split_md_lines(content):
-    """Split strictly on CommonMark line endings (CRLF, LF, CR), preserving bytes."""
+    """Split strictly on CommonMark line endings (CRLF, LF, CR), preserving bytes in O(N) time."""
     if not content:
         return []
     lines = []
     pos = 0
     n = len(content)
+    nl_r = content.find("\r", 0)
+    nl_n = content.find("\n", 0)
     while pos < n:
-        nl_r = content.find("\r", pos)
-        nl_n = content.find("\n", pos)
+        if nl_r != -1 and nl_r < pos:
+            nl_r = content.find("\r", pos)
+        if nl_n != -1 and nl_n < pos:
+            nl_n = content.find("\n", pos)
         if nl_r == -1 and nl_n == -1:
             lines.append(content[pos:])
             break
@@ -695,6 +732,258 @@ def _line_interrupts_bq_paragraph(stripped_nl, cols):
     return False
 
 
+def _line_interrupts_para_text(line):
+    """Return True if `line` (without trailing CR/LF) interrupts a paragraph in CommonMark."""
+    if line.strip(" \t") == "":
+        return True
+    if strip_single_bq_prefix(line, 0)[0] is not None:
+        return True
+    cols, _ = leading_columns(line, 0)
+    return _line_interrupts_bq_paragraph(line, cols)
+
+
+def _parse_link_ref_def(text_lines, start_idx):
+    """If text_lines[start_idx:] begins a CommonMark §4.7 link reference definition,
+    return the number of lines consumed (>= 1). Otherwise return 0.
+    """
+    n_lines = len(text_lines)
+    if start_idx >= n_lines:
+        return 0
+    first = text_lines[start_idx]
+    cols, idx = leading_columns(first, 0)
+    if cols > 3 or idx >= len(first) or first[idx] != "[":
+        return 0
+
+    def line_ok(li_idx):
+        if li_idx >= n_lines:
+            return False
+        if li_idx == start_idx:
+            return True
+        return not _line_interrupts_para_text(text_lines[li_idx])
+
+    # 1. Link label: '[' + 1..999 chars (at least one non-ws), no unescaped '[' or ']'.
+    li = start_idx
+    ci = idx + 1
+    label_len = 0
+    has_non_ws = False
+    found_close = False
+    while line_ok(li):
+        ln = text_lines[li]
+        ln_len = len(ln)
+        while ci < ln_len:
+            ch = ln[ci]
+            if ch == "\\" and ci + 1 < ln_len:
+                label_len += 2
+                if label_len > 999:
+                    return 0
+                has_non_ws = True
+                ci += 2
+                continue
+            if ch == "[":
+                return 0
+            if ch == "]":
+                found_close = True
+                ci += 1
+                break
+            label_len += 1
+            if label_len > 999:
+                return 0
+            if ch not in (" ", "\t"):
+                has_non_ws = True
+            ci += 1
+        if found_close:
+            break
+        label_len += 1
+        if label_len > 999:
+            return 0
+        li += 1
+        ci = 0
+
+    if not found_close or not has_non_ws:
+        return 0
+    ln = text_lines[li]
+    if ci >= len(ln) or ln[ci] != ":":
+        return 0
+    ci += 1
+
+    # 2. Optional spaces/tabs + at most one line break + optional spaces/tabs before destination.
+    while ci < len(ln) and ln[ci] in (" ", "\t"):
+        ci += 1
+    if ci >= len(ln):
+        li += 1
+        if not line_ok(li):
+            return 0
+        ln = text_lines[li]
+        ci = 0
+        while ci < len(ln) and ln[ci] in (" ", "\t"):
+            ci += 1
+        if ci >= len(ln):
+            return 0
+
+    # 3. Link destination: <...> on one line or non-empty balanced-parens bare destination.
+    if ln[ci] == "<":
+        ci += 1
+        closed_angle = False
+        while ci < len(ln):
+            ch = ln[ci]
+            if ch == "\\" and ci + 1 < len(ln):
+                ci += 2
+                continue
+            if ch == "<":
+                return 0
+            if ch == ">":
+                closed_angle = True
+                ci += 1
+                break
+            ci += 1
+        if not closed_angle:
+            return 0
+    else:
+        dest_start = ci
+        paren_depth = 0
+        while ci < len(ln):
+            ch = ln[ci]
+            oc = ord(ch)
+            if oc <= 0x20 or oc == 0x7F:
+                break
+            if ch == "\\" and ci + 1 < len(ln):
+                ci += 2
+                continue
+            if ch == "(":
+                paren_depth += 1
+                if paren_depth > 32:
+                    return 0
+            elif ch == ")":
+                if paren_depth == 0:
+                    return 0
+                paren_depth -= 1
+            ci += 1
+        if ci == dest_start or paren_depth != 0:
+            return 0
+
+    dest_line_idx = li
+
+    def parse_title(t_li, t_ci):
+        t_ln = text_lines[t_li]
+        if t_ci >= len(t_ln):
+            return 0
+        opener = t_ln[t_ci]
+        if opener == '"':
+            closer = '"'
+        elif opener == "'":
+            closer = "'"
+        elif opener == "(":
+            closer = ")"
+        else:
+            return 0
+        t_ci += 1
+        cur_li = t_li
+        while cur_li < n_lines:
+            if cur_li > t_li and not line_ok(cur_li):
+                return 0
+            cur_ln = text_lines[cur_li]
+            cur_len = len(cur_ln)
+            while t_ci < cur_len:
+                ch = cur_ln[t_ci]
+                if ch == "\\" and t_ci + 1 < cur_len:
+                    t_ci += 2
+                    continue
+                if opener == "(" and ch == "(":
+                    return 0
+                if ch == closer:
+                    t_ci += 1
+                    if cur_ln[t_ci:].strip(" \t") != "":
+                        return 0
+                    return cur_li + 1
+                t_ci += 1
+            cur_li += 1
+            t_ci = 0
+        return 0
+
+    # 4. Trailing content on destination line, or optional title starting on next line.
+    ws_start = ci
+    while ci < len(ln) and ln[ci] in (" ", "\t"):
+        ci += 1
+    if ci < len(ln):
+        if ci == ws_start:
+            return 0
+        title_end = parse_title(li, ci)
+        if title_end == 0:
+            return 0
+        return title_end - start_idx
+
+    base_consumed = (dest_line_idx + 1) - start_idx
+    next_li = dest_line_idx + 1
+    if line_ok(next_li):
+        next_ln = text_lines[next_li]
+        nci = 0
+        while nci < len(next_ln) and next_ln[nci] in (" ", "\t"):
+            nci += 1
+        if nci < len(next_ln) and next_ln[nci] in ('"', "'", "("):
+            title_end = parse_title(next_li, nci)
+            if title_end > 0:
+                return title_end - start_idx
+    return base_consumed
+
+
+def _list_item_body(line, start_col, m_list):
+    """Return (body_text, body_start_col) for the first line of a list item per CommonMark §5.2."""
+    lead_cols, _ = leading_columns(m_list.group(1), start_col)
+    marker_end_col = start_col + lead_cols + len(m_list.group(2))
+    after = line[m_list.end(2):]
+    ws_cols, ws_idx = leading_columns(after, marker_end_col)
+    rest = after[ws_idx:]
+    if rest == "":
+        return "", marker_end_col + 1
+    if ws_cols >= 5:
+        return (" " * (ws_cols - 1)) + rest, marker_end_col + 1
+    return rest, marker_end_col + max(ws_cols, 1)
+
+
+def _nested_line_opens_or_continues_para(text, start_col, prev_in_para):
+    """Return True iff `text` inside a nested container (list item or nested blockquote)
+    leaves an open paragraph at the end of this line."""
+    if text.strip(" \t") == "":
+        return False
+    cols, idx = leading_columns(text, start_col)
+    if not prev_in_para and cols >= 4:
+        return False
+    if cols <= 3:
+        norm = (" " * cols) + text[idx:]
+        m_f = FENCE_OPEN_RE.match(norm)
+        if m_f and not (m_f.group(1)[0] == "`" and "`" in m_f.group(2)):
+            return False
+        if html_block_end_kind(norm, allow_type7=not prev_in_para) is not None:
+            return False
+        if ATX_HEADING_RE.match(norm) or THEMATIC_BREAK_RE.match(norm):
+            return False
+        if prev_in_para and SETEXT_UNDERLINE_RE.match(norm):
+            return False
+        if not prev_in_para and text[idx] == "[" and _parse_link_ref_def([norm], 0) > 0:
+            return False
+        inner_bq, inner_col = strip_single_bq_prefix(text, start_col)
+        if inner_bq is not None:
+            return _nested_line_opens_or_continues_para(inner_bq, inner_col, False)
+        m_list = LIST_ITEM_RE.match(norm)
+        if m_list:
+            if (not prev_in_para) or _can_list_interrupt_paragraph(m_list, norm):
+                body, body_col = _list_item_body(norm, start_col, m_list)
+                return _nested_line_opens_or_continues_para(body, body_col, False)
+            return True
+    return True
+
+
+def _strip_exact_bq_layers(text, start_col, depth):
+    """Strip exactly `depth` leading '>' layers; return (inner, col) or (None, start_col)."""
+    cur, col = text, start_col
+    for _ in range(depth):
+        nxt, nxt_col = strip_single_bq_prefix(cur, col)
+        if nxt is None:
+            return None, start_col
+        cur, col = nxt, nxt_col
+    return cur, col
+
+
 def _commonmark_code_span_ranges(para_text):
     """Return list of (start, end) character ranges of CommonMark §6.1 inline code spans."""
     ranges = []
@@ -751,6 +1040,28 @@ def _comment_in_code_span(line_offset, inner_text, span_ranges):
 
 def iter_markdown_lines(content):
     """Yield (raw_line, eligible_for_top_level_drop) with CommonMark container tracking."""
+    raw_lines = split_md_lines(content)
+    stripped_lines = []
+    for idx_s, rl in enumerate(raw_lines):
+        sn = rl.rstrip("\r\n")
+        if idx_s == 0 and sn.startswith("\ufeff"):
+            sn = sn[1:]
+        stripped_lines.append(sn)
+
+    def collect_bq_ref_lines(start_i):
+        out = []
+        n_all = len(stripped_lines)
+        k = start_i
+        while k < n_all:
+            s = stripped_lines[k]
+            inn, _ = strip_single_bq_prefix(s, 0)
+            cand = inn if inn is not None else s
+            if k > start_i and _line_interrupts_para_text(cand):
+                break
+            out.append(cand)
+            k += 1
+        return out
+
     in_fence = False
     fence_char = ""
     fence_len = 0
@@ -758,8 +1069,10 @@ def iter_markdown_lines(content):
     in_indented = False
     html_kind = None
     in_paragraph = False
+    skip_ref_def_lines = 0
     # List container stack: list of minimum content column offsets
     list_indents = []
+    list_in_para = False
     # Blockquote-nested state (tracks fences, HTML blocks, indented code, nested lists, nested quotes)
     bq_fence_char = ""
     bq_fence_len = 0
@@ -769,18 +1082,42 @@ def iter_markdown_lines(content):
     bq_in_nested_para = False
     bq_in_indented = False
     bq_list_indents = []
+    bq_skip_ref_def_lines = 0
+    bq_nested_fence_char = ""
+    bq_nested_fence_len = 0
+    bq_nested_html_kind = None
+    bq_nested_depth = 0
+
+    def reset_bq_nested_blocks():
+        nonlocal bq_nested_fence_char, bq_nested_fence_len, bq_nested_html_kind, bq_nested_depth
+        bq_nested_fence_char = ""
+        bq_nested_fence_len = 0
+        bq_nested_html_kind = None
+        bq_nested_depth = 0
 
     # Collect (raw_line, eligible, para_chunk_or_None, is_bq_para_line) so a second pass
     # can accurately protect single- and multi-line CommonMark §6.1 inline code spans
     # inside blockquote paragraphs (including lazy continuation closing backticks).
     records = []
 
-    for line_idx, raw_line in enumerate(split_md_lines(content)):
-        stripped_nl = raw_line.rstrip("\r\n")
-        if line_idx == 0 and stripped_nl.startswith("\ufeff"):
-            stripped_nl = stripped_nl[1:]
+    for line_idx, raw_line in enumerate(raw_lines):
+        stripped_nl = stripped_lines[line_idx]
         is_blank = stripped_nl.strip(" \t") == ""
         cols, idx = leading_columns(stripped_nl, 0)
+
+        # 0. Multi-line link reference definition continuation lines (CommonMark §4.7)
+        if skip_ref_def_lines > 0:
+            skip_ref_def_lines -= 1
+            in_paragraph = False
+            records.append([raw_line, False, None, False])
+            continue
+        if bq_skip_ref_def_lines > 0:
+            bq_skip_ref_def_lines -= 1
+            bq_in_paragraph = False
+            bq_in_nested_para = False
+            in_paragraph = False
+            records.append([raw_line, False, None, False])
+            continue
 
         # 1. Active fenced code block (top-level or list-nested)
         if in_fence:
@@ -834,25 +1171,39 @@ def iter_markdown_lines(content):
             bq_in_nested_para = False
             bq_in_indented = False
             bq_list_indents = []
+            reset_bq_nested_blocks()
 
         # 3. Blank line
         if is_blank:
             records.append([raw_line, False, None, False])
             in_paragraph = False
+            list_in_para = False
             continue
 
-        # 4. Active list container (popping levels whose indent exceeds current cols)
+        # 4. Active list container (popping levels whose indent exceeds current cols,
+        # while respecting CommonMark §5.2 lazy paragraph continuation)
         if list_indents:
+            if cols < list_indents[-1] and list_in_para and bq_inner is None and not _line_interrupts_bq_paragraph(stripped_nl, cols):
+                records.append([raw_line, False, None, False])
+                in_paragraph = False
+                continue
             while list_indents and cols < list_indents[-1]:
                 list_indents.pop()
-            if list_indents:
-                inner_list = stripped_nl[idx:]
-                m_lf = FENCE_OPEN_RE.match(inner_list)
-                if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
-                    in_fence = True
-                    fence_char = m_lf.group(1)[0]
-                    fence_len = len(m_lf.group(1))
-                    fence_list_indent = list_indents[-1]
+            if not list_indents:
+                list_in_para = False
+            else:
+                rel_cols = cols - list_indents[-1]
+                rel_text = (" " * rel_cols) + stripped_nl[idx:]
+                opened_fence = False
+                if rel_cols <= 3:
+                    m_lf = FENCE_OPEN_RE.match(rel_text)
+                    if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
+                        in_fence = True
+                        fence_char = m_lf.group(1)[0]
+                        fence_len = len(m_lf.group(1))
+                        fence_list_indent = list_indents[-1]
+                        opened_fence = True
+                list_in_para = False if opened_fence else _nested_line_opens_or_continues_para(rel_text, 0, list_in_para)
                 records.append([raw_line, False, None, False])
                 in_paragraph = False
                 continue
@@ -895,7 +1246,7 @@ def iter_markdown_lines(content):
             in_paragraph = False
             continue
 
-        # 7b. ATX heading, setext heading underline, or thematic break (all end/prevent paragraph)
+        # 7b. ATX heading, setext heading underline, thematic break, or link reference definition
         if cols <= 3 and (
             ATX_HEADING_RE.match(stripped_nl)
             or (in_paragraph and SETEXT_UNDERLINE_RE.match(stripped_nl))
@@ -905,17 +1256,30 @@ def iter_markdown_lines(content):
             records.append([raw_line, False, None, False])
             continue
 
+        if (not in_paragraph) and cols <= 3 and idx < len(stripped_nl) and stripped_nl[idx] == "[":
+            ref_lines = _parse_link_ref_def(stripped_lines, line_idx)
+            if ref_lines > 0:
+                skip_ref_def_lines = ref_lines - 1
+                in_paragraph = False
+                records.append([raw_line, False, None, False])
+                continue
+
         # 8. List item open (bullet or ordered) — respecting CommonMark §5.2 paragraph interruption
         m_list = LIST_ITEM_RE.match(stripped_nl)
         if m_list and ((not in_paragraph) or _can_list_interrupt_paragraph(m_list, stripped_nl)):
             list_indents.append(list_item_content_indent(stripped_nl, 0, m_list))
-            after_marker = stripped_nl[m_list.end():]
-            m_lf = FENCE_OPEN_RE.match(after_marker)
-            if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
-                in_fence = True
-                fence_char = m_lf.group(1)[0]
-                fence_len = len(m_lf.group(1))
-                fence_list_indent = list_indents[-1]
+            body, body_col = _list_item_body(stripped_nl, 0, m_list)
+            b_cols_l, _ = leading_columns(body, body_col)
+            opened_fence = False
+            if b_cols_l <= 3:
+                m_lf = FENCE_OPEN_RE.match(body)
+                if m_lf and not (m_lf.group(1)[0] == "`" and "`" in m_lf.group(2)):
+                    in_fence = True
+                    fence_char = m_lf.group(1)[0]
+                    fence_len = len(m_lf.group(1))
+                    fence_list_indent = list_indents[-1]
+                    opened_fence = True
+            list_in_para = False if opened_fence else _nested_line_opens_or_continues_para(body, body_col, False)
             records.append([raw_line, False, None, False])
             in_paragraph = False
             continue
@@ -928,6 +1292,7 @@ def iter_markdown_lines(content):
 
             # 9a. Active blockquote-nested fence (direct or inside bq list)
             if bq_fence_char:
+                reset_bq_nested_blocks()
                 if bq_fence_list_indent is not None and not inner_blank and bcols < bq_fence_list_indent:
                     bq_fence_char = ""
                     bq_fence_len = 0
@@ -947,6 +1312,7 @@ def iter_markdown_lines(content):
 
             # 9b. Active blockquote-nested HTML block
             if bq_html_kind is not None:
+                reset_bq_nested_blocks()
                 if bq_html_kind == "blank" and inner_blank:
                     bq_html_kind = None
                 elif html_block_closes(bq_html_kind, bq_inner):
@@ -960,6 +1326,7 @@ def iter_markdown_lines(content):
                 records.append([raw_line, False, None, False])
                 bq_in_paragraph = False
                 bq_in_nested_para = False
+                reset_bq_nested_blocks()
                 continue
 
             # 9c. Active blockquote-nested list container
@@ -967,19 +1334,32 @@ def iter_markdown_lines(content):
                 while bq_list_indents and bcols < bq_list_indents[-1]:
                     bq_list_indents.pop()
                 if bq_list_indents:
-                    inner_bl = bq_inner[bidx:]
-                    m_blf = FENCE_OPEN_RE.match(inner_bl)
-                    if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
-                        bq_fence_char = m_blf.group(1)[0]
-                        bq_fence_len = len(m_blf.group(1))
-                        bq_fence_list_indent = bq_list_indents[-1]
+                    reset_bq_nested_blocks()
+                    rel_bcols = bcols - bq_list_indents[-1]
+                    rel_btext = (" " * rel_bcols) + bq_inner[bidx:]
+                    opened_bfence = False
+                    opened_bhtml = False
+                    if rel_bcols <= 3:
+                        m_blf = FENCE_OPEN_RE.match(rel_btext)
+                        if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
+                            bq_fence_char = m_blf.group(1)[0]
+                            bq_fence_len = len(m_blf.group(1))
+                            bq_fence_list_indent = bq_list_indents[-1]
+                            opened_bfence = True
+                        else:
+                            bhk_l = html_block_end_kind(rel_btext, allow_type7=not bq_in_nested_para)
+                            if bhk_l is not None:
+                                if not html_block_closes(bhk_l, rel_btext):
+                                    bq_html_kind = bhk_l
+                                opened_bhtml = True
                     records.append([raw_line, False, None, False])
                     bq_in_paragraph = False
-                    bq_in_nested_para = False
+                    bq_in_nested_para = False if (opened_bfence or opened_bhtml) else _nested_line_opens_or_continues_para(rel_btext, 0, bq_in_nested_para)
                     continue
 
             # 9d. Blockquote-nested indented code (CommonMark §4.4: cannot interrupt paragraph)
             if bq_in_indented:
+                reset_bq_nested_blocks()
                 if bcols >= 4:
                     records.append([raw_line, False, None, False])
                     bq_in_paragraph = False
@@ -987,16 +1367,18 @@ def iter_markdown_lines(content):
                     continue
                 bq_in_indented = False
             if (not bq_in_paragraph) and (not bq_in_nested_para) and bcols >= 4:
+                reset_bq_nested_blocks()
                 bq_in_indented = True
                 records.append([raw_line, False, None, False])
                 bq_in_paragraph = False
                 bq_in_nested_para = False
                 continue
 
-            # 9e. Blockquote-nested fence, HTML block, heading/break, or list open
+            # 9e. Blockquote-nested fence, HTML block, heading/break, link ref def, or list open
             if bcols <= 3:
                 m_bo = FENCE_OPEN_RE.match(bq_inner[bidx:])
                 if m_bo and not (m_bo.group(1)[0] == "`" and "`" in m_bo.group(2)):
+                    reset_bq_nested_blocks()
                     bq_fence_char = m_bo.group(1)[0]
                     bq_fence_len = len(m_bo.group(1))
                     bq_fence_list_indent = None
@@ -1006,6 +1388,7 @@ def iter_markdown_lines(content):
                     continue
                 bhk = html_block_end_kind(bq_inner, allow_type7=(not bq_in_paragraph and not bq_in_nested_para))
                 if bhk is not None:
+                    reset_bq_nested_blocks()
                     if not html_block_closes(bhk, bq_inner):
                         bq_html_kind = bhk
                     records.append([raw_line, False, None, False])
@@ -1014,48 +1397,114 @@ def iter_markdown_lines(content):
                     continue
                 if (
                     ATX_HEADING_RE.match(bq_inner)
-                    or ((bq_in_paragraph or bq_in_nested_para) and SETEXT_UNDERLINE_RE.match(bq_inner))
+                    or (bq_in_paragraph and SETEXT_UNDERLINE_RE.match(bq_inner))
                     or THEMATIC_BREAK_RE.match(bq_inner)
                 ):
+                    reset_bq_nested_blocks()
                     records.append([raw_line, False, None, False])
                     bq_in_paragraph = False
                     bq_in_nested_para = False
                     continue
+                if (not bq_in_paragraph) and (not bq_in_nested_para) and bidx < len(bq_inner) and bq_inner[bidx] == "[":
+                    bq_ref_lines = _parse_link_ref_def(collect_bq_ref_lines(line_idx), 0)
+                    if bq_ref_lines > 0:
+                        reset_bq_nested_blocks()
+                        bq_skip_ref_def_lines = bq_ref_lines - 1
+                        bq_in_paragraph = False
+                        bq_in_nested_para = False
+                        records.append([raw_line, False, None, False])
+                        continue
                 m_blist = LIST_ITEM_RE.match(bq_inner)
                 if m_blist and ((not bq_in_paragraph and not bq_in_nested_para) or _can_list_interrupt_paragraph(m_blist, bq_inner)):
+                    reset_bq_nested_blocks()
                     bq_list_indents.append(list_item_content_indent(bq_inner, bq_col, m_blist))
-                    after_bm = bq_inner[m_blist.end():]
-                    m_blf = FENCE_OPEN_RE.match(after_bm)
-                    if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
-                        bq_fence_char = m_blf.group(1)[0]
-                        bq_fence_len = len(m_blf.group(1))
-                        bq_fence_list_indent = bq_list_indents[-1]
+                    b_body, b_body_col = _list_item_body(bq_inner, bq_col, m_blist)
+                    b_body_cols, _ = leading_columns(b_body, b_body_col)
+                    opened_bfence = False
+                    opened_bhtml = False
+                    if b_body_cols <= 3:
+                        m_blf = FENCE_OPEN_RE.match(b_body)
+                        if m_blf and not (m_blf.group(1)[0] == "`" and "`" in m_blf.group(2)):
+                            bq_fence_char = m_blf.group(1)[0]
+                            bq_fence_len = len(m_blf.group(1))
+                            bq_fence_list_indent = bq_list_indents[-1]
+                            opened_bfence = True
+                        else:
+                            bhk_l = html_block_end_kind(b_body, allow_type7=True)
+                            if bhk_l is not None:
+                                if not html_block_closes(bhk_l, b_body):
+                                    bq_html_kind = bhk_l
+                                opened_bhtml = True
                     records.append([raw_line, False, None, False])
                     bq_in_paragraph = False
-                    bq_in_nested_para = False
+                    bq_in_nested_para = False if (opened_bfence or opened_bhtml) else _nested_line_opens_or_continues_para(b_body, b_body_col, False)
                     continue
 
             # Nested blockquote (`> > ...`) and its lazy continuation lines are never plugin drops.
             nested_inner, nested_col = strip_single_bq_prefix(bq_inner, bq_col)
             if nested_inner is not None:
-                n_blank = nested_inner.strip(" \t") == ""
-                ncols, _ = leading_columns(nested_inner, nested_col)
-                n_non_para = (
-                    n_blank
-                    or ncols >= 4
-                    or bool(ATX_HEADING_RE.match(nested_inner))
-                    or bool(THEMATIC_BREAK_RE.match(nested_inner))
-                    or bool(FENCE_OPEN_RE.match(nested_inner))
-                    or html_block_end_kind(nested_inner, allow_type7=True) is not None
-                    or bool(LIST_ITEM_RE.match(nested_inner))
-                )
-                bq_in_nested_para = not n_non_para
+                # First handle active fence / HTML block at exact bq_nested_depth.
+                if bq_nested_fence_char or bq_nested_html_kind is not None:
+                    exact_inner, exact_col = _strip_exact_bq_layers(bq_inner, bq_col, bq_nested_depth)
+                    if exact_inner is not None:
+                        ecols, eidx = leading_columns(exact_inner, exact_col)
+                        e_blank = exact_inner.strip(" \t") == ""
+                        if bq_nested_fence_char:
+                            if not e_blank and ecols <= 3:
+                                m_nc = re.match(r"^(`{3,}|~{3,})[ \t]*$", exact_inner[eidx:])
+                                if m_nc and m_nc.group(1)[0] == bq_nested_fence_char and len(m_nc.group(1)) >= bq_nested_fence_len:
+                                    bq_nested_fence_char = ""
+                                    bq_nested_fence_len = 0
+                        elif bq_nested_html_kind is not None:
+                            if bq_nested_html_kind == "blank" and e_blank:
+                                bq_nested_html_kind = None
+                            elif html_block_closes(bq_nested_html_kind, exact_inner):
+                                bq_nested_html_kind = None
+                        bq_in_nested_para = False
+                        bq_in_paragraph = False
+                        records.append([raw_line, False, None, False])
+                        continue
+                    reset_bq_nested_blocks()
+
+                deep_inner, deep_col = nested_inner, nested_col
+                depth = 1
+                while True:
+                    nxt, nxt_col = strip_single_bq_prefix(deep_inner, deep_col)
+                    if nxt is None:
+                        break
+                    deep_inner, deep_col = nxt, nxt_col
+                    depth += 1
+
+                prev_same_para = bq_in_nested_para and (depth <= bq_nested_depth)
+                dcols, didx = leading_columns(deep_inner, deep_col)
+                d_blank = deep_inner.strip(" \t") == ""
+                if d_blank:
+                    bq_in_nested_para = False
+                elif dcols <= 3:
+                    dnorm = (" " * dcols) + deep_inner[didx:]
+                    m_nf = FENCE_OPEN_RE.match(dnorm)
+                    if m_nf and not (m_nf.group(1)[0] == "`" and "`" in m_nf.group(2)):
+                        bq_nested_fence_char = m_nf.group(1)[0]
+                        bq_nested_fence_len = len(m_nf.group(1))
+                        bq_in_nested_para = False
+                    else:
+                        nhk = html_block_end_kind(dnorm, allow_type7=not prev_same_para)
+                        if nhk is not None:
+                            if not html_block_closes(nhk, dnorm):
+                                bq_nested_html_kind = nhk
+                            bq_in_nested_para = False
+                        else:
+                            bq_in_nested_para = _nested_line_opens_or_continues_para(deep_inner, deep_col, prev_same_para)
+                else:
+                    bq_in_nested_para = _nested_line_opens_or_continues_para(deep_inner, deep_col, prev_same_para)
+                bq_nested_depth = depth
                 bq_in_paragraph = False
                 records.append([raw_line, False, None, False])
                 continue
 
+            reset_bq_nested_blocks()
             if bq_in_nested_para:
-                # CommonMark §5.1 lazy continuation of nested blockquote paragraph.
+                # CommonMark §5.1 lazy continuation of nested blockquote or bq-list paragraph.
                 records.append([raw_line, False, None, False])
                 continue
 
@@ -1288,7 +1737,7 @@ class PoopEverywherePlugin:
     def count_markers(self, content):
         if not isinstance(content, str):
             return 0
-        return sum(1 for line, eligible in iter_markdown_lines(content) if eligible and MARKER_LINE_RE.match(line))
+        return sum(1 for line, eligible in iter_markdown_lines(content) if eligible and match_marker_line(line))
 
     def strip_markers(self, content):
         if not isinstance(content, str):
@@ -1307,15 +1756,16 @@ class PoopEverywherePlugin:
             raw, elig = items[idx_pos]
             if not elig:
                 return False
-            mm = MARKER_LINE_RE.match(raw)
+            mm = match_marker_line(raw)
             if not mm:
                 return False
-            k = mm.group(2) or mm.group(1) or "classic"
+            k = mm.group("kind") or mm.group("legacy") or "classic"
             return k not in ("wrap-start", "wrap-end")
 
         kept = []
         removed = 0
         in_wrap = False
+        in_wrap_legacy = False
         eat_next_blank = False
         prev_removed_drop = False
         pending_bq_sep = False
@@ -1326,25 +1776,30 @@ class PoopEverywherePlugin:
                 if line in ("\n", "\r\n", "\r") or is_bare_bq_sep(line):
                     continue
             if eligible:
-                m = MARKER_LINE_RE.match(line)
+                m = match_marker_line(line)
                 if m:
-                    is_legacy = m.group(2) is None
-                    kind = m.group(2) or m.group(1) or "classic"
-                    meta = m.group(3) or ""
+                    is_legacy = m.group("kind") is None
+                    kind = m.group("kind") or m.group("legacy") or "classic"
+                    meta = m.group("meta") or ""
                     meta_flags = set(meta.split(",")) if meta else set()
                     if kind == "wrap-start":
                         in_wrap = True
-                        eat_next_blank = True
+                        in_wrap_legacy = is_legacy
+                        eat_next_blank = not is_legacy
                         prev_removed_drop = False
                         pending_bq_sep = False
                         pending_blank_sep = False
                     elif kind == "wrap-end":
                         if in_wrap:
-                            if kept and (kept[-1] in ("\n", "\r\n", "\r") or is_bare_bq_sep(kept[-1])):
-                                kept.pop()
+                            if not in_wrap_legacy:
+                                if kept and (kept[-1] in ("\n", "\r\n", "\r") or is_bare_bq_sep(kept[-1])):
+                                    kept.pop()
                             if not line.endswith(("\n", "\r")) and kept and kept[-1].endswith("\n"):
                                 kept[-1] = kept[-1][:-1]
+                                if kept[-1] == "":
+                                    kept.pop()
                         in_wrap = False
+                        in_wrap_legacy = False
                         eat_next_blank = False
                         prev_removed_drop = False
                         pending_bq_sep = False
@@ -1424,10 +1879,43 @@ class PoopEverywherePlugin:
     def effective_caption(self):
         raw = str(self.config.get("caption") or "")
         raw = re.sub(r"[\r\n\u2028\u2029]+", " ", raw)
-        raw = raw.replace("-->", "").replace("<!--", "")
-        raw = EMOJI_RE.sub("", raw).strip()
+        while "<!--" in raw or "-->" in raw:
+            raw = raw.replace("-->", "").replace("<!--", "")
+        raw = raw.replace("`", "'")
+        raw = EMOJI_RE.sub("", raw)
+        while True:
+            trimmed = raw.strip().rstrip("\\").strip()
+            if trimmed == raw:
+                break
+            raw = trimmed
         if raw and not (self.is_en() and CHINESE_RE.search(raw)):
-            return raw
+            probe = f"{raw}{DROP_SIGNATURE}"
+            is_opener = (
+                strip_single_bq_prefix(raw, 0)[0] is not None
+                or strip_single_bq_prefix(probe, 0)[0] is not None
+                or bool(ATX_HEADING_RE.match(raw))
+                or bool(ATX_HEADING_RE.match(probe))
+                or bool(THEMATIC_BREAK_RE.match(raw))
+                or bool(THEMATIC_BREAK_RE.match(probe))
+                or bool(SETEXT_UNDERLINE_RE.match(raw))
+                or bool(SETEXT_UNDERLINE_RE.match(probe))
+                or bool(FENCE_OPEN_RE.match(raw))
+                or bool(FENCE_OPEN_RE.match(probe))
+                or bool(LIST_ITEM_RE.match(raw))
+                or bool(LIST_ITEM_RE.match(probe))
+                or html_block_end_kind(raw, allow_type7=True) is not None
+                or html_block_end_kind(probe, allow_type7=True) is not None
+            )
+            cand = f"· {raw}" if is_opener else raw
+            probes = (
+                f"> {cand}{DROP_SIGNATURE}",
+                f"> {cand} #1{DROP_SIGNATURE}",
+                f"> --- {cand} ---{DROP_SIGNATURE}",
+                f"> · {cand} ·{DROP_SIGNATURE}",
+                f"> prev\n> {cand}{DROP_SIGNATURE}",
+            )
+            if all(self.count_markers(p) == 1 for p in probes):
+                return cand
         return self.t()["default_caption"]
 
     def build_drop_block(self, wrapped_text="", first_meta=""):
@@ -1509,6 +1997,10 @@ class PoopEverywherePlugin:
                 continue
             blank_run = 0
             cur_is_bq = strip_single_bq_prefix(s, 0)[0] is not None
+            if prev_was_bq and not saw_blank_after_bq and not cur_is_bq:
+                # Block's parser does not support CommonMark lazy blockquote continuations
+                # ("> A\nlazy" splits into "> A\n\nlazy"), so wrapping cannot round-trip losslessly.
+                return False
             if cur_is_bq and saw_blank_after_bq:
                 # Block's serializer merges consecutive separate blockquotes ("> A\n\n> B")
                 # into a single blockquote ("> A\n>\n> B"), so wrapping cannot round-trip losslessly.
@@ -2837,6 +3329,10 @@ class PoopEverywherePlugin:
             }
 
         if action_id == "dialog_keep":
+            if surface != SURFACE_DIALOG or not self.pending_flush_token or self.pending_flush_nb != self.notebook_root:
+                return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_surface(bridge, surface)}
+            if "dialog_token" in self.capabilities and dialog_token != self.pending_flush_token:
+                return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_flush_dialog()}
             self.pending_flush_token = ""
             self.pending_flush_nb = ""
             self.best_effort_call(bridge, "host.ui.close_dialog", {"id": "flush-confirm"})
