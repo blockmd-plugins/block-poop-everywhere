@@ -484,11 +484,11 @@ jobs:
                       count = check_renders(rpc, locale, surface)
                       print(f"{locale}/{layout} {surface}: {count} renders passed")
                   if actions:
-                      appearance = "settings_section:poop-appearance"
-                      rpc("plugin.render", {"surface": appearance, "values": {"bg_enabled": False}})
+                      settings_surface = "settings_page"
+                      rpc("plugin.render", {"surface": settings_surface, "values": {"bg_enabled": False}})
                       require(backdrop_state["enabled"] is False and storage["config"]["bg_enabled"] is False,
                               f"{locale}: turning off the backdrop in settings did not immediately apply and persist")
-                      rpc("plugin.render", {"surface": appearance, "values": {"bg_enabled": True}})
+                      rpc("plugin.render", {"surface": settings_surface, "values": {"bg_enabled": True}})
                       require(backdrop_state["enabled"] is True and backdrop_state["density"] == "medium",
                               f"{locale}: backdrop settings did not immediately apply")
                       for cmd in commands:
