@@ -2768,17 +2768,14 @@ class PoopEverywherePlugin:
 
     def render_settings_page(self, bridge):
         t = self.t()
-        total, _notes = self.active_counts_summary()
-        page_status = t["status_count"].format(n=total) if total > 0 else ""
 
         return {
             "title": t["title"],
-            "status": page_status,
+            "status": "",
             "cards": [
                 {
                     "id": "how-card",
                     "title": t["card_how"],
-                    "meta": t["card_how_meta"],
                     "items": [
                         {
                             "kind": "segmented",
