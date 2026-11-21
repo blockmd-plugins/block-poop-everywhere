@@ -7,7 +7,7 @@
     "zh": "到处拉屎",
     "en": "Poop Everywhere"
   },
-  "version": "1.0.10",
+  "version": "1.0.11",
   "author": "Block Community",
   "repo": "blockmd-plugins/block-poop-everywhere",
   "summary": {
@@ -27,7 +27,6 @@
     "notes:write",
     "events:note_saved",
     "ui:titlebar",
-    "ui:settings",
     "ui:commands",
     "ui:panels",
     "ui:status",
@@ -58,10 +57,6 @@
     "ui:titlebar": {
       "zh": "在顶栏挂载面板、快捷拉一坨与冲水按钮，并动态展示数量角标。",
       "en": "Mount panel, quick-drop, and flush buttons in the titlebar with live badges."
-    },
-    "ui:settings": {
-      "zh": "在「外观」内置设置页末尾追加编辑区矢量背景与夜光快捷设置卡片。",
-      "en": "Embed quick backdrop and dark-glow controls inside Appearance settings."
     },
     "ui:commands": {
       "zh": "向命令面板、默认快捷键、页面「…」菜单与编辑器右键菜单注册操作。",
@@ -162,31 +157,6 @@
           ],
           "accent_paths": [
             "M4 4l16 17"
-          ]
-        }
-      }
-    ],
-    "settings_sections": [
-      {
-        "id": "poop-appearance",
-        "tab": "appearance",
-        "title": {
-          "zh": "到处拉屎 · 编辑区背景",
-          "en": "Poop Everywhere Backdrop"
-        },
-        "icon": {
-          "view_box": "0 0 24 24",
-          "fill_paths": [
-            "M12 3c1.6 1 2.4 2.2 2.2 3.6 1.7.3 2.8 1.4 2.8 2.9 0 .5-.1 1-.4 1.4 1.5.4 2.4 1.5 2.4 2.9 0 .6-.2 1.2-.5 1.7 1 .5 1.5 1.3 1.5 2.3 0 1.6-1.3 2.7-3 2.7H7c-1.7 0-3-1.1-3-2.7 0-1 .5-1.8 1.5-2.3-.3-.5-.5-1.1-.5-1.7 0-1.4.9-2.5 2.4-2.9-.3-.4-.4-.9-.4-1.4 0-1.5 1.1-2.6 2.8-2.9C10.6 5.5 11 4.2 12 3Z"
-          ],
-          "stroke_paths": [
-            "M12 3c1.6 1 2.4 2.2 2.2 3.6 1.7.3 2.8 1.4 2.8 2.9 0 .5-.1 1-.4 1.4 1.5.4 2.4 1.5 2.4 2.9 0 .6-.2 1.2-.5 1.7 1 .5 1.5 1.3 1.5 2.3 0 1.6-1.3 2.7-3 2.7H7c-1.7 0-3-1.1-3-2.7 0-1 .5-1.8 1.5-2.3-.3-.5-.5-1.1-.5-1.7 0-1.4.9-2.5 2.4-2.9-.3-.4-.4-.9-.4-1.4 0-1.5 1.1-2.6 2.8-2.9C10.6 5.5 11 4.2 12 3Z"
-          ],
-          "accent_paths": [
-            "M9.2 10.9h4.2",
-            "M7.4 15.5h6.6",
-            "M18.8 4.2v2.4",
-            "M17.6 5.4h2.4"
           ]
         }
       }
