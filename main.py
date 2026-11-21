@@ -7,8 +7,7 @@ Demonstrates every Block plugin extension point and declarative UI control:
 - Left sidebar collapsible section + file-tree row badges
 - Custom vector editor backdrops (scatter / grid / watermark / corners + dark glow)
 - Right side panel + bottom status bar with icon + modal dialog + icon toasts
-- Built-in Appearance settings section + full 14-control plugin settings page
-- Everyday settings stay to three choices: how many, backdrop on/off, and caption
+- Plugin settings page (with 3 everyday controls)
 - Optimistic note read/write, note opening, live progress, save & workspace hooks
 """
 
@@ -27,17 +26,15 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PLUGIN_ID = "block-poop-everywhere"
-PLUGIN_VERSION = "1.0.10"
+PLUGIN_VERSION = "1.0.11"
 
 SURFACE_SETTINGS = "settings_page"
-SURFACE_APPEARANCE = "settings_section:poop-appearance"
 SURFACE_PANEL = "panel:poop-board"
 SURFACE_SIDEBAR = "sidebar_section:today-drops"
 SURFACE_DIALOG = "dialog:flush-confirm"
 
 ALL_SURFACES = (
     SURFACE_SETTINGS,
-    SURFACE_APPEARANCE,
     SURFACE_PANEL,
     SURFACE_SIDEBAR,
     SURFACE_DIALOG,
@@ -161,7 +158,6 @@ EXTENSION_MAP = [
     ("contributes.status_items", "ui:status"),
     ("contributes.dialogs", "ui:notify"),
     ("host.ui.toast (with icon)", "ui:notify"),
-    ("contributes.settings_sections", "ui:settings"),
     ("surfaces: [settings_page]", "built-in"),
     ("host.editor.selection / insert", "editor:read / write"),
     ("host.notes.open / read / write", "notes:read / write"),
@@ -173,7 +169,6 @@ STRINGS = {
         "title": "到处拉屎",
         "panel_title": "屎量面板",
         "sidebar_title": "今日屎迹",
-        "appearance_title": "到处拉屎 · 编辑区背景",
         "dialog_title": "全部冲掉？",
         "default_caption": "到此一拉",
         "act_drop_now": "立即拉一坨",
@@ -184,7 +179,6 @@ STRINGS = {
         "act_save": "保存设置",
         "act_demo_toast": "试看四类提示",
         "act_rescan": "重新扫描笔记",
-        "act_reset_bg": "恢复默认背景",
         "act_keep": "先留着",
         "act_confirm_flush": "确认冲掉",
         "card_how": "怎么拉",
@@ -192,8 +186,7 @@ STRINGS = {
         "card_where": "允许拉屎的笔记本",
         "card_stats": "战况与空间分布",
         "card_map": "开发者扩展点速查表",
-        "card_map_badge": "17 处全覆盖",
-        "card_bg_sec": "编辑区矢量背景",
+        "card_map_badge": "16 处全覆盖",
         "card_panel_stats": "实时战况",
         "card_panel_recent": "最近屎迹",
         "card_panel_ops": "快捷操作",
@@ -238,7 +231,7 @@ STRINGS = {
         "kv_last": "上次拉屎",
         "kv_never": "尚未开张",
         "kv_points": "已接入扩展点",
-        "kv_points_val": "17 项全量接入",
+        "kv_points_val": "16 项全量接入",
         "kv_env": "运行环境",
         "tm_total_label": "全界面互动分布",
         "tm_total_val": "{n} 次互动",
@@ -266,7 +259,6 @@ STRINGS = {
         "toast_dropped_note": "拉好了，已向 {note} 写入 {n} 坨",
         "toast_wrapped_sel": "已把选中的内容变成屎",
         "toast_no_selection": "当前没有选中文字，已改为在光标处拉一坨",
-        "toast_bg_reset": "已恢复默认背景配置",
         "toast_heavy_warn": "{note} 已经堆了 {n} 坨，悠着点",
         "toast_blocked_nb": "当前笔记本未在允许列表里，已跳过",
         "toast_no_note": "当前没有可操作的 Markdown 笔记",
@@ -326,7 +318,6 @@ STRINGS = {
         "title": "Poop Everywhere",
         "panel_title": "Poop Board",
         "sidebar_title": "Today's Drops",
-        "appearance_title": "Poop Everywhere Backdrop",
         "dialog_title": "Flush Everything?",
         "default_caption": "Poop was here",
         "act_drop_now": "Drop One Now",
@@ -337,7 +328,6 @@ STRINGS = {
         "act_save": "Save Settings",
         "act_demo_toast": "Preview 4 Toasts",
         "act_rescan": "Rescan Notes",
-        "act_reset_bg": "Reset Backdrop",
         "act_keep": "Keep for Now",
         "act_confirm_flush": "Confirm Flush",
         "card_how": "How to Drop",
@@ -345,8 +335,7 @@ STRINGS = {
         "card_where": "Allowed Notebooks",
         "card_stats": "Status & Breakdown",
         "card_map": "Developer Extension Map",
-        "card_map_badge": "17 Surfaces Wired",
-        "card_bg_sec": "Editor Vector Backdrop",
+        "card_map_badge": "16 Surfaces Wired",
         "card_panel_stats": "Live Metrics",
         "card_panel_recent": "Recent Drops",
         "card_panel_ops": "Quick Actions",
@@ -391,7 +380,7 @@ STRINGS = {
         "kv_last": "Last Drop",
         "kv_never": "Not yet",
         "kv_points": "Extension Points",
-        "kv_points_val": "All 17 Connected",
+        "kv_points_val": "All 16 Connected",
         "kv_env": "Runtime",
         "tm_total_label": "Surface Activity",
         "tm_total_val": "{n} events",
@@ -419,7 +408,6 @@ STRINGS = {
         "toast_dropped_note": "Wrote {n} drop mark(s) into {note}",
         "toast_wrapped_sel": "Turned selection into a poop callout",
         "toast_no_selection": "No selection found; dropped one at cursor instead",
-        "toast_bg_reset": "Reset backdrop to defaults",
         "toast_heavy_warn": "{note} already has {n} drops. Easy there.",
         "toast_blocked_nb": "Active notebook is not in the allowlist; skipped",
         "toast_no_note": "No active Markdown note to update",
@@ -2562,7 +2550,7 @@ class PoopEverywherePlugin:
                 f"- Host Version: `{self.host_version or 'unknown'}`",
                 f"- Active Drops: {total} across {notes} note(s)",
                 "",
-                "## All 17 Connected Extension Surfaces",
+                "## All 16 Connected Extension Surfaces",
                 "",
                 "| Extension Key | Required Permission |",
                 "| --- | --- |",
@@ -2575,7 +2563,7 @@ class PoopEverywherePlugin:
                 f"- 宿主版本：`{self.host_version or 'unknown'}`",
                 f"- 当前统计：共 {total} 坨，波及 {notes} 篇笔记",
                 "",
-                "## 已接入的 17 项扩展点",
+                "## 已接入的 16 项扩展点",
                 "",
                 "| 扩展点键名 | 所需权限 |",
                 "| --- | --- |",
@@ -2722,7 +2710,7 @@ class PoopEverywherePlugin:
             return False
         changed = False
         bg_changed = False
-        is_settings = surface in (SURFACE_SETTINGS, SURFACE_APPEARANCE)
+        is_settings = surface == SURFACE_SETTINGS
         prev_bg_enabled = self.config["bg_enabled"]
 
         for key, allowed in (
@@ -2821,26 +2809,6 @@ class PoopEverywherePlugin:
                         },
                     ],
                 },
-            ],
-        }
-
-    def render_appearance_section(self):
-        t = self.t()
-        return {
-            "title": t["appearance_title"],
-            "cards": [
-                {
-                    "id": "appearance-backdrop",
-                    "title": t["appearance_title"],
-                    "items": [
-                        {
-                            "kind": "switch",
-                            "id": "bg_enabled",
-                            "label": t["lbl_bg_enabled"],
-                            "value": self.config["bg_enabled"],
-                        },
-                    ],
-                }
             ],
         }
 
@@ -3021,8 +2989,6 @@ class PoopEverywherePlugin:
     def render_surface(self, bridge, surface):
         if surface == SURFACE_SETTINGS:
             return self.render_settings_page(bridge)
-        if surface == SURFACE_APPEARANCE:
-            return self.render_appearance_section()
         if surface == SURFACE_PANEL:
             return self.render_panel()
         if surface == SURFACE_SIDEBAR:
@@ -3199,20 +3165,6 @@ class PoopEverywherePlugin:
             self.refresh_other_surfaces(bridge, surface)
             return {"ok": ok, "tone": tone, "status": msg, "page": self.render_surface(bridge, surface)}
 
-        if surface == SURFACE_APPEARANCE and action_id == "reset_backdrop":
-            for key in ("bg_enabled", "bg_backdrop", "bg_pattern", "bg_density", "bg_tint", "bg_dark_glow"):
-                self.config[key] = DEFAULT_CONFIG[key]
-            self.save_config(bridge)
-            self.sync_host_ui(bridge)
-            self.refresh_other_surfaces(bridge, surface)
-            return {
-                "ok": True,
-                "tone": "info",
-                "status": t["toast_bg_reset"],
-                "page": self.render_surface(bridge, surface),
-                "values": page_values_for(surface, self.config),
-            }
-
         if action_id == "dialog_keep":
             if surface != SURFACE_DIALOG or not self.pending_flush_token or self.pending_flush_nb != self.notebook_root:
                 return {"ok": False, "tone": "warning", "status": t["toast_stale_confirm"], "page": self.render_surface(bridge, surface)}
@@ -3366,14 +3318,6 @@ def page_values_for(surface, cfg):
             "archive_dir": cfg["archive_dir"],
             "preview_mode": cfg["preview_mode"],
             "selected_notebooks": cfg["selected_notebooks"],
-        }
-    if surface == SURFACE_APPEARANCE:
-        return {
-            "bg_enabled": cfg["bg_enabled"],
-            "bg_pattern": cfg["bg_pattern"],
-            "bg_density": cfg["bg_density"],
-            "bg_tint": cfg["bg_tint"],
-            "bg_dark_glow": cfg["bg_dark_glow"],
         }
     return {}
 
