@@ -146,18 +146,18 @@ DEFAULT_STATE = {
 }
 
 EXTENSION_MAP = [
-    ("contributes.titlebar_buttons", "ui:titlebar"),
-    ("contributes.commands", "ui:commands"),
-    ("contributes.page_menu", "ui:commands"),
-    ("contributes.editor_menu", "ui:commands"),
-    ("contributes.sidebar_menu", "ui:sidebar"),
-    ("contributes.sidebar_sections", "ui:sidebar"),
-    ("contributes.file_badges", "ui:sidebar"),
-    ("contributes.backdrops", "ui:appearance"),
-    ("contributes.panels", "ui:panels"),
-    ("contributes.status_items", "ui:status"),
-    ("contributes.dialogs", "ui:notify"),
-    ("host.ui.toast (with icon)", "ui:notify"),
+    ("contributes.titlebar_buttons", "built-in"),
+    ("contributes.commands", "built-in"),
+    ("contributes.page_menu", "built-in"),
+    ("contributes.editor_menu", "built-in"),
+    ("contributes.sidebar_menu", "built-in"),
+    ("contributes.sidebar_sections", "built-in"),
+    ("contributes.file_badges", "built-in"),
+    ("contributes.backdrops", "built-in"),
+    ("contributes.panels", "built-in"),
+    ("contributes.status_items", "built-in"),
+    ("contributes.dialogs", "built-in"),
+    ("host.ui.toast (top-right banner)", "built-in"),
     ("surfaces: [settings_page]", "built-in"),
     ("host.editor.selection / insert", "editor:read / write"),
     ("host.notes.open / read / write", "notes:read / write"),
@@ -2270,7 +2270,6 @@ class PoopEverywherePlugin:
         self.best_effort_call(bridge, "host.ui.toast", {
             "message": message,
             "tone": tone,
-            "show_plugin_icon": True,
         })
 
     def report_progress(self, bridge, done, total, label=""):
@@ -3200,21 +3199,21 @@ class PoopEverywherePlugin:
         if cmd_id == "drop_here":
             ok, tone, msg = self.drop_at_editor_or_note(bridge, note, selection, wrap_selection=False, source=source)
             self.refresh_other_surfaces(bridge)
-            return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
+            return {"ok": ok, "tone": tone, "status": msg}
 
         if cmd_id == "poopify_selection":
             ok, tone, msg = self.drop_at_editor_or_note(bridge, note, selection, wrap_selection=True, source=source)
             self.refresh_other_surfaces(bridge)
-            return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
+            return {"ok": ok, "tone": tone, "status": msg}
 
         if cmd_id == "toggle_panel":
             method_name = "host.ui.toggle_panel" if "panel_toggle" in self.capabilities else "host.ui.open_panel"
             try:
                 res = bridge.call_host(method_name, {"id": "poop-board"})
             except HostRPCError:
-                return {"ok": False, "tone": "warning", "status": t["toast_panel_unavailable"], "show_plugin_icon": True}
+                return {"ok": False, "tone": "warning", "status": t["toast_panel_unavailable"]}
             if not isinstance(res, dict) or res.get("ok") is not True:
-                return {"ok": False, "tone": "warning", "status": t["toast_panel_unavailable"], "show_plugin_icon": True}
+                return {"ok": False, "tone": "warning", "status": t["toast_panel_unavailable"]}
             self.sync_host_ui(bridge)
             return {"ok": True}
 
@@ -3222,27 +3221,27 @@ class PoopEverywherePlugin:
             strict = source == "sidebar_menu"
             target = self.resolve_target_note(bridge, note, strict=strict)
             if not target:
-                return {"ok": False, "tone": "warning", "status": t["toast_no_note"], "show_plugin_icon": True}
+                return {"ok": False, "tone": "warning", "status": t["toast_no_note"]}
             if not self.is_active_notebook_allowed(bridge):
                 self.append_log("blocked", note=target, tone="danger")
                 self.save_state(bridge)
-                return {"ok": False, "tone": "error", "status": t["toast_blocked_nb"], "show_plugin_icon": True}
+                return {"ok": False, "tone": "error", "status": t["toast_blocked_nb"]}
             if strict:
                 self.state["sidebar_hits"] += 1
             ok, tone, msg = self.drop_into_note_file(bridge, target)
             self.refresh_other_surfaces(bridge)
-            return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
+            return {"ok": ok, "tone": tone, "status": msg}
 
         if cmd_id == "flush_note":
             strict = source == "sidebar_menu"
             ok, tone, msg = self.flush_single_note(bridge, note, strict=strict)
             self.refresh_other_surfaces(bridge)
-            return {"ok": ok, "tone": tone, "status": msg, "show_plugin_icon": True}
+            return {"ok": ok, "tone": tone, "status": msg}
 
         if cmd_id == "open_flush_dialog":
             ok, msg = self.open_flush_confirmation(bridge)
             if not ok:
-                return {"ok": False, "tone": "warning", "status": msg, "show_plugin_icon": True}
+                return {"ok": False, "tone": "warning", "status": msg}
             return {"ok": True}
 
         raise ValueError(t["err_unknown_command"].format(cmd=cmd_id))

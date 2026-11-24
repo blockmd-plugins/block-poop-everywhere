@@ -398,7 +398,7 @@ jobs:
                   if method == "host.ui.toast":
                       check_text(params.get("message", ""), locale, f"{locale} toast", allow_fixture=True)
                       toasts.append(params)
-                      return {"ok": True}
+                      return {"ok": True, "shown": True}
                   if method == "host.ui.toggle_panel":
                       panel_state["open"] = not panel_state["open"]
                       return {"ok": True, "open": panel_state["open"]}
