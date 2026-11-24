@@ -16,18 +16,18 @@
 
 | 界面位置 | 清单 / RPC 入口 | 所需权限 |
 | --- | --- | --- |
-| 顶栏按钮与动态角标 | `contributes.titlebar_buttons` + `host.titlebar.set_button` | `ui:titlebar` |
-| 命令面板与快捷键 | `contributes.commands`（`⌘⌥P` / `⌘⌥K`） | `ui:commands` |
-| 页面「…」菜单 | `contributes.page_menu` | `ui:commands` |
-| 编辑器右键菜单 | `contributes.editor_menu`（原生双色图标） | `ui:commands` |
-| 左侧栏右键菜单 | `contributes.sidebar_menu` | `ui:sidebar` |
-| 左侧栏底部插件分区 | `contributes.sidebar_sections`（`sidebar_section:*`） | `ui:sidebar` |
-| 文件树行尾角标 | `contributes.file_badges` + `host.sidebar.set_badges` | `ui:sidebar` |
-| 编辑区自定义矢量背景 | `contributes.backdrops` + `host.ui.set_backdrop` | `ui:appearance` |
-| 右侧边栏面板 | `contributes.panels`（`panel:*`） | `ui:panels` |
-| 底部状态栏（带图标） | `contributes.status_items` + `host.status.set` | `ui:status` |
-| 模态弹窗与带图标 Toast | `contributes.dialogs` + `host.ui.toast` | `ui:notify` |
-| 插件设置页（3 项） | `surfaces: ["settings_page"]` | 无需额外权限 |
+| 顶栏按钮与动态角标 | `contributes.titlebar_buttons` + `host.titlebar.set_button` | 免声明 |
+| 命令面板与快捷键 | `contributes.commands`（`⌘⌥P` / `⌘⌥K`） | 免声明 |
+| 页面「…」菜单 | `contributes.page_menu` | 免声明 |
+| 编辑器右键菜单 | `contributes.editor_menu`（原生双色图标） | 免声明 |
+| 左侧栏右键菜单 | `contributes.sidebar_menu` | 免声明 |
+| 左侧栏底部插件分区 | `contributes.sidebar_sections`（`sidebar_section:*`） | 免声明 |
+| 文件树行尾角标 | `contributes.file_badges` + `host.sidebar.set_badges` | 免声明 |
+| 编辑区自定义矢量背景 | `contributes.backdrops` + `host.ui.set_backdrop` | 免声明 |
+| 右侧边栏面板 | `contributes.panels`（`panel:*`） | 免声明 |
+| 底部状态栏（带图标） | `contributes.status_items` + `host.status.set` | 免声明 |
+| 模态弹窗与右上角通知横幅 | `contributes.dialogs` + `host.ui.toast` | 免声明 |
+| 插件设置页（3 项） | `surfaces: ["settings_page"]` | 免声明 |
 | 正文光标插入 / 选区替换 | `host.editor.selection` / `host.editor.insert` | `editor:read` / `editor:write` |
 | 笔记读写与列表点击跳转 | `host.notes.read` / `write` / `open` | `notes:read` / `notes:write` |
 | 保存钩子与工作区事件 | `plugin.event`（`note.saved` / `theme.changed` / `locale.changed`） | `events:note_saved` / `events:workspace` |
