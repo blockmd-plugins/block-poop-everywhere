@@ -22,26 +22,14 @@
     ]
   },
   "permissions": [
-    "storage",
     "notes:read",
     "notes:write",
     "events:note_saved",
-    "ui:titlebar",
-    "ui:commands",
-    "ui:panels",
-    "ui:status",
-    "ui:notify",
-    "ui:sidebar",
-    "ui:appearance",
     "editor:read",
     "editor:write",
     "events:workspace"
   ],
   "permission_reasons": {
-    "storage": {
-      "zh": "保存拉屎风格、背景参数、笔记本白名单与战况记录。",
-      "en": "Save style preferences, backdrop settings, notebook allowlist, and drop history."
-    },
     "notes:read": {
       "zh": "扫描笔记中的标记数量、展示统计并支持点击列表打开对应笔记。",
       "en": "Scan notes for drop markers, compute stats, and jump to notes from lists."
@@ -53,34 +41,6 @@
     "events:note_saved": {
       "zh": "保存笔记后自动重算该页标记数并刷新文件树角标与状态栏。",
       "en": "Recount drop markers after note saves and refresh file badges and status bar."
-    },
-    "ui:titlebar": {
-      "zh": "在顶栏挂载面板、快捷拉一坨与冲水按钮，并动态展示数量角标。",
-      "en": "Mount panel, quick-drop, and flush buttons in the titlebar with live badges."
-    },
-    "ui:commands": {
-      "zh": "向命令面板、默认快捷键、页面「…」菜单与编辑器右键菜单注册操作。",
-      "en": "Register commands, default shortcuts, page menu items, and editor menu items."
-    },
-    "ui:panels": {
-      "zh": "在右侧打开「屎量面板」展示实时统计、战报与快捷操作。",
-      "en": "Open the right-hand Poop Board side panel for live metrics and actions."
-    },
-    "ui:status": {
-      "zh": "在底部状态栏展示带图标的当前总数，点击可一键切换右侧面板。",
-      "en": "Display a live icon counter in the bottom status bar to toggle the board."
-    },
-    "ui:notify": {
-      "zh": "弹出四类语气带图标轻提示，并在冲水前打开二次确认弹窗。",
-      "en": "Show icon-bearing toasts across all tones and open a flush confirmation dialog."
-    },
-    "ui:sidebar": {
-      "zh": "在左侧栏挂载「今日屎迹」分区、文件树行尾角标与笔记右键菜单。",
-      "en": "Add Today's Drops sidebar section, file-tree row badges, and tree context actions."
-    },
-    "ui:appearance": {
-      "zh": "在编辑区背景层绘制可调图案、密度与暗色夜光效果的矢量水印。",
-      "en": "Render configurable vector patterns, watermarks, and dark-glow editor backdrops."
     },
     "editor:read": {
       "zh": "读取当前编辑器选中文本，以便将其包装成带附言的标记块。",
