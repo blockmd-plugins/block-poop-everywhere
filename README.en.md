@@ -4,32 +4,12 @@
   <img alt="Poop Everywhere" src="assets/card-en-light.png">
 </picture>
 
-**Official Interactive Kitchen-Sink Reference Plugin** -- a playful, complete plugin built to show Block plugin authors all 16 interactive UI surfaces and common host APIs in one working codebase (declarative language grammars, Tarot mode, and legacy grid backgrounds have dedicated reference plugins).
+A lighthearted prank plugin and official Block showcase (much like VS Code's official sample extensions).
 
-- **All 16 Interactive Extension Points Wired**: Titlebar buttons with live badges, command palette & shortcuts, page menu, editor context menu (with native dual-tone icons), sidebar tree context menu, collapsible left-sidebar section, file-tree row badges, custom vector editor backdrops (with dark-mode glow), right side panel, bottom status bar with icon, modal dialog, and icon-bearing toasts across all 4 tones.
-- **Everyday settings stay at 3 choices**: how many drops, the editor backdrop switch, and the caption. Shape, backdrop style, density, tint, and notebook scope keep their defaults. The sidebar, panel, and confirmation dialog still exercise the remaining controls.
-- **Zero Emoji, Zero Dependencies, Safely Reversible**: Written in pure Python standard library using Ocean Paper dual-tone SVG paths. Every note marker carries an owned HTML signature tag and skips fenced/indented code, raw HTML blocks, and list containers. Wrapped selections unwrap byte-for-byte intact alongside optimistic concurrency (`expected_revision`) so flushing removes only plugin-authored lines without touching user prose or code examples.
+- **Leave marks everywhere**: Drop marks across the top bar, the "Today's Drops" sidebar list and file badges, editor watermark backdrops (with dark-mode glow), the right-hand Poop Board counter, the bottom status bar, and right inside your notes or selected text.
+- **Flush clean anytime**: Click Flush and confirm when you are done -- it clears every mark and resets all counters to zero without touching any of your own writing.
+- **Simple to jump in**: Settings keep only the 3 everyday options (drop count, backdrop toggle, and caption), while the side panel lets you switch backdrop styles, view stats, and jump straight to marked notes.
 
-Adjust how many drops appear, toggle the editor backdrop, and set the caption in the plugin settings page. Saved preferences load at startup, and changes apply immediately.
-
-## Extension Point Map
-
-| Surface | Manifest / RPC Entry | Permission |
-| --- | --- | --- |
-| Titlebar buttons & live badges | `contributes.titlebar_buttons` + `host.titlebar.set_button` | Built-in |
-| Command palette & shortcuts | `contributes.commands` (`Cmd+Alt+P` / `K`) | Built-in |
-| Page action menu | `contributes.page_menu` | Built-in |
-| Editor context menu | `contributes.editor_menu` (native dual-tone icons) | Built-in |
-| Sidebar tree context menu | `contributes.sidebar_menu` | Built-in |
-| Left sidebar section | `contributes.sidebar_sections` (`sidebar_section:*`) | Built-in |
-| File-tree row badges | `contributes.file_badges` + `host.sidebar.set_badges` | Built-in |
-| Custom vector editor backdrops | `contributes.backdrops` + `host.ui.set_backdrop` | Built-in |
-| Right side panel | `contributes.panels` (`panel:*`) | Built-in |
-| Bottom status bar (with icon) | `contributes.status_items` + `host.status.set` | Built-in |
-| Modal dialog & top-right banners | `contributes.dialogs` + `host.ui.toast` | Built-in |
-| Plugin settings page (3 choices) | `surfaces: ["settings_page"]` | Built-in |
-| Caret insert & selection wrap | `host.editor.selection` / `host.editor.insert` | `editor:read` / `editor:write` |
-| Note I/O & click-to-open jump | `host.notes.read` / `write` / `open` | `notes:read` / `notes:write` |
-| Save & workspace hooks | `plugin.event` (`note.saved` / `theme.changed` / `locale.changed`) | `events:note_saved` / `events:workspace` |
+For developers curious about building Block plugins, this also serves as an official hands-on showcase of every UI surface in one place.
 
 **Install**: Open Block Settings -> App Store and search **Poop Everywhere**, or enter `blockmd-plugins/block-poop-everywhere`.
