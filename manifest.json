@@ -11,21 +11,18 @@
   "author": "Block Community",
   "repo": "blockmd-plugins/block-poop-everywhere",
   "summary": {
-    "zh": "官方全扩展点示范插件：覆盖顶栏、侧栏、文件树角标、编辑区背景、面板、菜单、状态栏与弹窗",
-    "en": "Official kitchen-sink demo covering titlebar, sidebar sections, file badges, editor backdrops, panels, menus, status bar, and dialogs"
+    "zh": "趣味整蛊彩蛋插件：在顶栏、背景和笔记里到处留痕，玩够一键冲水，兼作官方示例",
+    "en": "Playful prank plugin to drop marks across Block and flush them clean, also an official UI showcase"
   },
   "entry": {
-    "command": [
-      "python3",
-      "-u",
-      "main.py"
-    ]
+    "js": "main.js"
   },
   "permissions": [
     "storage",
     "notes:read",
     "notes:write",
     "events:note_saved",
+    "system:fs",
     "ui:titlebar",
     "ui:commands",
     "ui:panels",
@@ -39,60 +36,64 @@
   ],
   "permission_reasons": {
     "storage": {
-      "zh": "保存拉屎风格、背景参数、笔记本白名单与战况记录。",
-      "en": "Save style preferences, backdrop settings, notebook allowlist, and drop history."
+      "zh": "记住你选的背景样式、附言内容和累计战绩，下次打开还在",
+      "en": "Remember your backdrop style, custom captions, and drop stats across restarts"
     },
     "notes:read": {
-      "zh": "扫描笔记中的标记数量、展示统计并支持点击列表打开对应笔记。",
-      "en": "Scan notes for drop markers, compute stats, and jump to notes from lists."
+      "zh": "数一数每篇笔记里留了多少痕，点侧栏记录就能直接跳过去",
+      "en": "Count marks in each note so clicking the list jumps straight to that note"
     },
     "notes:write": {
-      "zh": "向笔记写入可识别标记并在冲水时精确清理插件留下的标记行。",
-      "en": "Insert identifiable drop markers into notes and cleanly remove them on flush."
+      "zh": "往笔记里放进专属标记，点「冲水」时再把它们干净删掉",
+      "en": "Place plugin marks inside notes and cleanly erase only those marks when flushing"
     },
     "events:note_saved": {
-      "zh": "保存笔记后自动重算该页标记数并刷新文件树角标与状态栏。",
-      "en": "Recount drop markers after note saves and refresh file badges and status bar."
+      "zh": "保存笔记后自动重新统计数量，让角标和状态栏数字保持最新",
+      "en": "Recount marks right after you save a note to keep badges and counters fresh"
+    },
+    "system:fs": {
+      "zh": "把扩展点参考手册导出到你指定的归档文件夹或下载目录",
+      "en": "Export the extension reference guide into your chosen archive folder or Downloads"
     },
     "ui:titlebar": {
-      "zh": "在顶栏挂载面板、快捷拉一坨与冲水按钮，并动态展示数量角标。",
-      "en": "Mount panel, quick-drop, and flush buttons in the titlebar with live badges."
+      "zh": "在顶栏放上开关面板、一键留痕和「冲水」按钮，并实时显示数量",
+      "en": "Add board, quick-drop, and flush buttons with live counts to the top bar"
     },
     "ui:commands": {
-      "zh": "向命令面板、默认快捷键、页面「…」菜单与编辑器右键菜单注册操作。",
-      "en": "Register commands, default shortcuts, page menu items, and editor menu items."
+      "zh": "把留痕和冲水动作放进命令面板、快捷键以及笔记和右键菜单里",
+      "en": "Add drop and flush actions to the Command Palette, shortcuts, and right-click menus"
     },
     "ui:panels": {
-      "zh": "在右侧打开「屎量面板」展示实时统计、战报与快捷操作。",
-      "en": "Open the right-hand Poop Board side panel for live metrics and actions."
+      "zh": "在右侧打开「屎量面板」，查看实时统计、最近战报和快捷按钮",
+      "en": "Open the Poop Board panel on the right for live stats, logs, and quick buttons"
     },
     "ui:status": {
-      "zh": "在底部状态栏展示带图标的当前总数，点击可一键切换右侧面板。",
-      "en": "Display a live icon counter in the bottom status bar to toggle the board."
+      "zh": "在底部状态栏显示当前总数，点一下就能打开或收起右侧面板",
+      "en": "Show the live drop count in the bottom status bar to toggle the right panel"
     },
     "ui:notify": {
-      "zh": "弹出四类语气带图标轻提示，并在冲水前打开二次确认弹窗。",
-      "en": "Show icon-bearing toasts across all tones and open a flush confirmation dialog."
+      "zh": "操作后弹出轻提示，并在「全部冲掉」前弹窗让你再次确认",
+      "en": "Show quick toast alerts after actions and confirm before flushing everything"
     },
     "ui:sidebar": {
-      "zh": "在左侧栏挂载「今日屎迹」分区、文件树行尾角标与笔记右键菜单。",
-      "en": "Add Today's Drops sidebar section, file-tree row badges, and tree context actions."
+      "zh": "在左侧栏加上「今日屎迹」列表、文件旁的小角标和右键清理菜单",
+      "en": "Add Today's Drops list, file-tree badges, and right-click actions to the sidebar"
     },
     "ui:appearance": {
-      "zh": "在编辑区背景层绘制可调图案、密度与暗色夜光效果的矢量水印。",
-      "en": "Render configurable vector patterns, watermarks, and dark-glow editor backdrops."
+      "zh": "在编辑区铺上可调浓度的矢量图案背景，深色模式下还会发夜光",
+      "en": "Show adjustable vector backdrops behind the editor, with dark-mode glow"
     },
     "editor:read": {
-      "zh": "读取当前编辑器选中文本，以便将其包装成带附言的标记块。",
-      "en": "Read the active editor selection to wrap selected text into a marked block."
+      "zh": "读取你在编辑器里选中的文字，好把它包进带附言的趣味标记块里",
+      "en": "Read your selected text so you can wrap it into a fun marked callout"
     },
     "editor:write": {
-      "zh": "在当前光标处插入标记块，或直接替换选中的正文内容。",
-      "en": "Insert marked blocks at the caret or replace the active editor selection."
+      "zh": "把标记直接放进当前光标位置，或替换掉选中的那一段文字",
+      "en": "Insert a mark at the cursor or wrap the currently selected text"
     },
     "events:workspace": {
-      "zh": "监听笔记切换、深浅色主题与语言变化事件并同步界面状态。",
-      "en": "React to note open, theme change, and locale change workspace events."
+      "zh": "切换笔记、深浅色主题或语言时，自动把面板和背景跟着换好",
+      "en": "Update the board and backdrop automatically when you switch notes, theme, or language"
     }
   },
   "surfaces": [
@@ -472,6 +473,28 @@
           "accent_paths": [
             "M4 4l16 17"
           ]
+        }
+      }
+    ],
+    "block_decorators": [
+      {
+        "id": "poop-drop",
+        "block_kind": "quote",
+        "signature_prefix": "block-poop-everywhere:drop",
+        "legacy_tag_prefix": "poop",
+        "default_callout": "warning",
+        "callout_by_kind": {
+          "ribbon": "important",
+          "pellet": "tip",
+          "wrap": "note",
+          "wrap-start": "note",
+          "wrap-end": "note",
+          "wrap_gold": "note",
+          "wrap_rainbow": "note"
+        },
+        "empty_placeholder": {
+          "zh": "到此一拉",
+          "en": "Dropped here"
         }
       }
     ]
