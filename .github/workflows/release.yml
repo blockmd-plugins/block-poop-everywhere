@@ -33,6 +33,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Plan version and package plugin
         id: plan
         env:
@@ -42,938 +46,1259 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           FORCE: ${{ inputs.force == true && 'true' || 'false' }}
         run: |
-          python3 - <<'PY'
-          from collections import deque
-          from concurrent.futures import ThreadPoolExecutor
-          import datetime
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          from queue import Empty, Queue
-          import re
-          import shutil
-          import subprocess
-          import sys
-          from tempfile import TemporaryDirectory
-          from threading import Thread
+          node --input-type=module - <<'JS'
+          import { execFileSync, spawn } from 'node:child_process';
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
 
-          CHINESE = re.compile(
-              r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
-              r"\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uffef"
-              r"\U00020000-\U0002ffff\U00030000-\U000323af]"
-          )
-          HAN = re.compile(
-              r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
-              r"\U00020000-\U0002ffff\U00030000-\U000323af]"
-          )
-          EMOJI = re.compile(
-              r"[©®‼⁉™ℹ↔-↙↩↪⌚-⌛⌨⏏⏩-⏳⏸-⏺Ⓜ▪▫▶◀◻-◾"
-              r"\u2600-\u27bf⤴⤵⬅-⬇⬛⬜⭐⭕〰〽㊗㊙"
-              r"\u20e3\ufe00-\ufe0f\U0001f000-\U0001faff]"
-          )
-          MAX_README_BYTES = 512 * 1024
-          NOTEBOOK_NAME = "示例笔记本"
-          NOTE_NAME = "示例笔记.md"
-          LAYOUTS = {
-              "legacy": [],
-              "full": [
-                  "checklist", "form_layout", "multi_notebook", "kv_tooltip",
-                  "sidebar_sections", "file_badges", "sidebar_menu", "backdrops",
-                  "status_icon", "toast_icon", "notes_open", "log_actions",
-                  "action_progress", "panel_toggle", "editor_insert_mode", "dialog_token",
-              ],
+          const CHINESE_RE = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\ufe10-\ufe1f\ufe30-\ufe4f\uff00-\uffef\u{20000}-\u{2ffff}\u{30000}-\u{323af}]/u;
+          const HAN_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u{20000}-\u{2ffff}\u{30000}-\u{323af}]/u;
+          const EMOJI_RE = /[©®‼⁉™ℹ↔-↙↩↪⌚-⌛⌨⏏⏩-⏳⏸-⏺Ⓜ▪▫▶◀◻-◾\u2600-\u27bf⤴⤵⬅-⬇⬛⬜⭐⭕〰〽㊗㊙\u20e3\ufe00-\ufe0f\u{1f000}-\u{1faff}]/u;
+          const MAX_README_BYTES = 512 * 1024;
+          const NOTEBOOK_NAME = '示例笔记本';
+          const NOTE_NAME = '示例笔记.md';
+          const LAYOUTS = {
+            legacy: [],
+            full: [
+              'checklist', 'form_layout', 'multi_notebook', 'kv_tooltip',
+              'sidebar_sections', 'file_badges', 'sidebar_menu', 'backdrops',
+              'status_icon', 'toast_icon', 'notes_open', 'log_actions',
+              'action_progress', 'panel_toggle', 'editor_insert_mode', 'dialog_token',
+            ],
+          };
+
+          function requireCond(condition, message) {
+            if (!condition) {
+              throw new Error(message);
+            }
           }
 
-          def require(condition, message):
-              if not condition:
-                  raise ValueError(message)
-
-          def check_text(value, locale, context, *, allow_fixture=False):
-              if isinstance(value, str):
-                  if allow_fixture:
-                      value = value.replace(NOTEBOOK_NAME, "").replace(NOTE_NAME, "").replace(NOTE_NAME[:-3], "")
-                  require(not EMOJI.search(value), f"{context}: emoji in {value!r}")
-                  if locale.lower().startswith("en"):
-                      require(not CHINESE.search(value), f"{context}: Chinese text in {value!r}")
-              elif isinstance(value, dict):
-                  for key, child in value.items():
-                      check_text(key, "zh", f"{context}.<key>", allow_fixture=False)
-                      check_text(child, locale, f"{context}.{key}", allow_fixture=allow_fixture)
-              elif isinstance(value, list):
-                  for index, child in enumerate(value):
-                      check_text(child, locale, f"{context}[{index}]", allow_fixture=allow_fixture)
-
-          def check_contributes_en(value, context="manifest.contributes"):
-              if isinstance(value, dict):
-                  for key, child in value.items():
-                      if key == "en":
-                          check_text(child, "en", f"{context}.en")
-                      else:
-                          check_contributes_en(child, f"{context}.{key}")
-              elif isinstance(value, list):
-                  for index, child in enumerate(value):
-                      check_contributes_en(child, f"{context}[{index}]")
-
-          def declared_surfaces(manifest):
-              surfaces = list(manifest.get("surfaces") or [])
-              contributes = manifest.get("contributes") or {}
-              for sec in contributes.get("settings_sections") or []:
-                  surfaces.append(f"settings_section:{sec['id']}")
-              for panel in contributes.get("panels") or []:
-                  surfaces.append(f"panel:{panel['id']}")
-              for sec in contributes.get("sidebar_sections") or []:
-                  surfaces.append(f"sidebar_section:{sec['id']}")
-              for dialog in contributes.get("dialogs") or []:
-                  surfaces.append(f"dialog:{dialog['id']}")
-              require(surfaces, "manifest must declare at least one surface")
-              return list(dict.fromkeys(surfaces))
-
-          def check_no_symlinks_tree(pkg_dir):
-              require(not os.path.islink(pkg_dir) and pkg_dir.is_dir(), f"Release package dir must be a non-symlink directory: {pkg_dir}")
-              for root_dir, dir_names, file_names in os.walk(pkg_dir, followlinks=False):
-                  for name in dir_names + file_names:
-                      full_path = os.path.join(root_dir, name)
-                      require(
-                          not os.path.islink(full_path),
-                          f"Symlink is not allowed in release package: {os.path.relpath(full_path, pkg_dir)}",
-                      )
-
-          def strip_html_comments(text):
-              text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
-              text = re.sub(r"<!--.*$", "", text, flags=re.S)
-              return text.strip()
-
-          def read_strict_readme(pkg_dir, filename):
-              path = pkg_dir / filename
-              p = str(path)
-              require(not os.path.islink(p) and os.path.isfile(p), f"{filename} must be a non-symlink regular file")
-              raw = path.read_bytes()
-              require(len(raw) <= MAX_README_BYTES, f"{filename} exceeds {MAX_README_BYTES} bytes")
-              try:
-                  text = raw.decode("utf-8")
-              except UnicodeDecodeError as exc:
-                  raise ValueError(f"{filename} must be valid UTF-8: {exc}") from None
-              text = text.lstrip("\ufeff").strip()
-              require(bool(text), f"{filename} must not be empty")
-              return text
-
-          def resolve_entry_command(pkg_dir, manifest):
-              entry = manifest.get("entry")
-              require(isinstance(entry, dict), "manifest.entry must be an object")
-              raw_cmd = entry.get("command")
-              require(isinstance(raw_cmd, list) and len(raw_cmd) > 0, "manifest.entry.command must be a non-empty array")
-              for idx, part in enumerate(raw_cmd):
-                  require(isinstance(part, str), f"manifest.entry.command[{idx}] must be a string")
-              cmd0 = raw_cmd[0]
-              require(cmd0.strip() != "", "manifest.entry.command[0] must not be empty")
-              require(cmd0 == cmd0.strip(), "manifest.entry.command[0] must not have leading/trailing whitespace")
-              require("\x00" not in cmd0 and ":" not in cmd0, f"Invalid entry.command[0]: {cmd0!r}")
-
-              normalized = cmd0.replace("\\", "/")
-              require(not normalized.startswith("/") and not os.path.isabs(cmd0), f"entry.command[0] must not be an absolute path: {cmd0!r}")
-              raw_parts = [p for p in normalized.split("/") if p != ""]
-              require(".." not in raw_parts, f"entry.command[0] must not contain '..': {cmd0!r}")
-              require(normalized not in (".", "./") and raw_parts != ["."], f"entry.command[0] must not be '.': {cmd0!r}")
-
-              if "/" in normalized or normalized.startswith("."):
-                  pkg_root = pkg_dir.resolve()
-                  rel_parts = [p for p in raw_parts if p != "."]
-                  require(bool(rel_parts), f"Invalid relative entry.command[0]: {cmd0!r}")
-                  cur = pkg_dir
-                  for part in rel_parts[:-1]:
-                      cur = cur / part
-                      require(not os.path.islink(cur) and cur.is_dir(), f"entry.command[0] parent missing or symlink: {cmd0!r}")
-                  target = cur / rel_parts[-1]
-                  require(not os.path.islink(target) and target.is_file(), f"entry.command[0] must be a non-symlink regular file in dist package: {cmd0!r}")
-                  resolved = target.resolve()
-                  require(resolved.is_relative_to(pkg_root) and resolved != pkg_root, f"entry.command[0] escapes dist package: {cmd0!r}")
-                  resolved_cmd0 = str(resolved)
-              else:
-                  found = shutil.which(cmd0)
-                  require(found is not None, f"entry.command[0] is not a valid PATH command: {cmd0!r}")
-                  resolved_cmd0 = found
-
-              return [resolved_cmd0, *raw_cmd[1:]]
-
-          def controls(value):
-              if isinstance(value, dict):
-                  kind = value.get("kind")
-                  if kind in ("segmented", "select", "switch"):
-                      choices = [False, True] if kind == "switch" else [
-                          opt["value"] for opt in value["options"]
-                      ]
-                      yield value["id"], value["value"], choices
-                  for child in value.values():
-                      yield from controls(child)
-              elif isinstance(value, list):
-                  for child in value:
-                      yield from controls(child)
-
-          def check_renders(rpc, locale, surface):
-              initial = rpc("plugin.render", {"surface": surface, "values": {}})["page"]
-              check_text(initial, locale, f"{locale} {surface} initial", allow_fixture=True)
-              rendered = list(controls(initial))
-              base = {key: current for key, current, _ in rendered}
-              count = 1
-              for key, current, choices in rendered:
-                  for choice in choices:
-                      if choice == current:
-                          continue
-                      variant = {**base, key: choice}
-                      page = rpc("plugin.render", {"surface": surface, "values": variant})["page"]
-                      check_text(page, locale, f"{locale} {surface} {key}={choice}", allow_fixture=True)
-                      count += 1
-              return count
-
-          def run_plugin(entry, pkg_dir, locale, layout, capabilities, root, surfaces, commands, actions=False):
-              notebook = root / NOTEBOOK_NAME
-              downloads = root / "Downloads"
-              data_dir = root / "Data"
-              for directory in (notebook, downloads, data_dir):
-                  directory.mkdir()
-              protected_samples = [
-                  "> [poop:classic] user example <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] bq fence <!-- block-poop-everywhere:drop -->",
-                  "  > [poop:classic] list fence <!-- block-poop-everywhere:drop -->",
-                  " \t> [poop:classic] tab indented <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] html block <!-- block-poop-everywhere:drop -->",
-                  "LineBefore\u2028> [poop:classic] ls sep <!-- block-poop-everywhere:drop -->",
-                  ">   > [poop:classic] bq list fence <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] bq tab fence <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] custom html7 <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] heading html7 <!-- block-poop-everywhere:drop -->",
-                  ">     > [poop:classic] bq heading indented <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] nested lazy cont <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] multiline code span <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] nested lazy bare cont <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] code span lazy cont <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] code span ord2 <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] refdef list2 <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] nested ord2 lazy <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] bq list lazy <!-- block-poop-everywhere:drop -->",
-                  "> [poop:classic] nested bq list lazy <!-- block-poop-everywhere:drop -->",
-                  "> example \\<!-- block-poop-everywhere:drop -->",
-              ]
-              notes = {
-                  NOTE_NAME: (
-                      "# Demo\n\n"
-                      "~~~md\n" + protected_samples[0] + "\n~~~\n\n"
-                      "> ```md\n" + protected_samples[1] + "\n> ```\n\n"
-                      "- ```md\n" + protected_samples[2] + "\n  ```\n\n"
-                      + protected_samples[3] + "\n\n"
-                      "<pre>\n" + protected_samples[4] + "\n</pre>\n\n"
-                      + protected_samples[5] + "\n\n"
-                      "> - ```md\n" + protected_samples[6] + "\n>   ```\n\n"
-                      ">\t ```md\n" + protected_samples[7] + "\n> ```\n\n"
-                      "<custom>\n" + protected_samples[8] + "\n\n"
-                      "# HeadingBeforeCustom\n<custom>\n" + protected_samples[9] + "\n\n"
-                      "> # HeadingInsideBQ\n" + protected_samples[10] + "\n\n"
-                      "> > nested paragraph\n" + protected_samples[11] + "\n\n"
-                      "> example `start\n" + protected_samples[12] + "\n> end`\n\n"
-                      "> > nested bare\nlazy bare line\n" + protected_samples[13] + "\n\n"
-                      "> span `open\nlazy line inside span\n" + protected_samples[14] + "\n> close`\n\n"
-                      "> span `open2\n> 2. not a list\n" + protected_samples[15] + "\n> close2`\n\n"
-                      "[r]: /url\n2. item\n   " + protected_samples[16] + "\n\n"
-                      "> > A\n> > 2. x\n" + protected_samples[17] + "\n\n"
-                      "> - A\n" + protected_samples[18] + "\n\n"
-                      "> > - A\n" + protected_samples[19] + "\n\n"
-                      + protected_samples[20] + "\n\n"
-                      "Hello Block.\n"
-                  ),
-                  "BOMFence.md": "\ufeff```md\n> [poop:classic] bom fence <!-- block-poop-everywhere:drop -->\n```\n",
-                  " A.md": "# Leading Space Note\n",
-                  "A.md": "# Normal Note\n",
-                  "Notes.MD": "# Uppercase Extension\n",
-                  "Extra.markdown": "# Markdown Extension\n",
-                  "NoEOL.md": "A",
-                  "OnlyLF.md": "\n",
-                  "MixedEOL.md": "A\n\r\n",
-                  "LegacyWrap1.md": "> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n\nA\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->",
-                  "LegacyWrap2.md": "> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n>\n> A\n>\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->",
-                  "WrapTarget.md": "Intro\n\nfirst\n\nsecond\n\nOutro\n",
+          function checkText(value, locale, context, allowFixture = false) {
+            if (typeof value === 'string') {
+              let v = value;
+              if (allowFixture) {
+                v = v
+                  .replaceAll(NOTEBOOK_NAME, '')
+                  .replaceAll(NOTE_NAME, '')
+                  .replaceAll(NOTE_NAME.slice(0, -3), '');
               }
-              storage = {"config": {"bg_enabled": False}} if layout == "legacy" else {}
-              backdrop_state = {
-                  "enabled": layout == "legacy",
-                  "id": "poop-wallpaper",
-                  "pattern": "scatter",
-                  "density": "medium",
-                  "opacity": 0.10,
-                  "tint": "accent",
-                  "dark_glow": False,
+              requireCond(!EMOJI_RE.test(v), `${context}: emoji in ${JSON.stringify(v)}`);
+              if (locale.toLowerCase().startsWith('en')) {
+                requireCond(!CHINESE_RE.test(v), `${context}: Chinese text in ${JSON.stringify(v)}`);
               }
-              badges_state = {}
-              status_state = {}
-              titlebar_state = {}
-              panel_state = {"open": False}
-              dialog_mode = {"state": "ok", "seq": 0, "token": ""}
-              active_note_state = {"path": NOTE_NAME}
-              active_selection = {"note": "WrapTarget.md", "text": "first\n\nsecond"}
-              toasts = []
-              opened_notes = []
+            } else if (Array.isArray(value)) {
+              value.forEach((child, idx) => checkText(child, locale, `${context}[${idx}]`, allowFixture));
+            } else if (value && typeof value === 'object') {
+              for (const [key, child] of Object.entries(value)) {
+                checkText(key, 'zh', `${context}.<key>`, false);
+                checkText(child, locale, `${context}.${key}`, allowFixture);
+              }
+            }
+          }
 
-              def note_rev(text):
-                  return hashlib.sha256(text.encode("utf-8")).hexdigest()
+          function checkContributesEn(value, context = 'manifest.contributes') {
+            if (Array.isArray(value)) {
+              value.forEach((child, idx) => checkContributesEn(child, `${context}[${idx}]`));
+            } else if (value && typeof value === 'object') {
+              for (const [key, child] of Object.entries(value)) {
+                if (key === 'en') {
+                  checkText(child, 'en', `${context}.en`);
+                } else {
+                  checkContributesEn(child, `${context}.${key}`);
+                }
+              }
+            }
+          }
 
-              def host(method, params):
-                  if method == "host.storage.get":
-                      key = params["key"]
-                      return {"found": key in storage, "value": storage.get(key)}
-                  if method == "host.storage.set":
-                      storage[params["key"]] = params["value"]
-                      return {"ok": True}
-                  if method == "host.notebooks.list":
-                      return {"notebooks": [{"path": str(notebook), "name": NOTEBOOK_NAME, "active": True}]}
-                  if method == "host.notes.list":
-                      return {"notes": [{"path": p, "title": os.path.splitext(p)[0]} for p in sorted(notes)]}
-                  if method == "host.notes.read":
-                      p = params["path"]
-                      require(p in notes, f"host.notes.read unknown path: {p!r}")
-                      content = notes[p]
-                      return {"content": content, "revision": note_rev(content), "dirty": False}
-                  if method == "host.notes.write":
-                      p = params["path"]
-                      exp = params.get("expected_revision")
-                      if exp and p in notes and note_rev(notes[p]) != exp:
-                          return {"__rpc_error__": {"code": -32006, "message": "revision conflict"}}
-                      notes[p] = params["content"]
-                      return {"ok": True, "revision": note_rev(notes[p])}
-                  if method == "host.notes.active":
-                      cur = active_note_state["path"]
-                      if not cur:
-                          return {"active": False, "path": "", "title": "", "notebook_root": str(notebook)}
-                      return {"active": True, "path": cur, "title": os.path.splitext(cur)[0], "notebook_root": str(notebook)}
-                  if method == "host.notes.open":
-                      opened_notes.append((params.get("notebook_root", ""), params["path"]))
-                      return {"ok": True}
-                  if method == "host.editor.selection":
-                      return {
-                          "note": active_selection["note"],
-                          "text": active_selection["text"],
-                          "has_selection": bool(active_selection["text"]),
-                      }
-                  if method == "host.editor.insert":
-                      target = params.get("note") or NOTE_NAME
-                      text = params.get("text", "")
-                      mode = params.get("mode") or "replace"
-                      cur = notes.get(target, "")
-                      sel = active_selection["text"] if active_selection["note"] == target else ""
-                      if sel and sel in cur:
-                          if mode == "replace":
-                              notes[target] = cur.replace(sel, text, 1)
-                          else:
-                              idx = cur.index(sel) + len(sel)
-                              notes[target] = cur[:idx] + text + cur[idx:]
-                      else:
-                          notes[target] = cur + text
-                      return {"ok": True, "path": target}
-                  if method == "host.titlebar.set_button":
-                      titlebar_state[params.get("id", "")] = params
-                      return {"ok": True}
-                  if method == "host.status.set":
-                      status_state[params.get("id", "")] = params
-                      return {"ok": True}
-                  if method == "host.sidebar.set_badges":
-                      require("badge_id" in params, "host.sidebar.set_badges requires badge_id")
-                      require(len(params.get("entries") or {}) <= 512, "host.sidebar.set_badges exceeded 512 entries")
-                      if params.get("clear"):
-                          badges_state.clear()
-                      else:
-                          if not params.get("patch"):
-                              badges_state.clear()
-                          for rel, ent in (params.get("entries") or {}).items():
-                              if ent is None:
-                                  badges_state.pop(rel, None)
-                              else:
-                                  badges_state[rel] = ent
-                      return {"ok": True, "count": len(badges_state)}
-                  if method == "host.sidebar.get_badges":
-                      return {"entries": dict(badges_state)}
-                  if method == "host.ui.backdrop":
-                      return dict(backdrop_state)
-                  if method == "host.ui.set_backdrop":
-                      backdrop_state.update({k: v for k, v in params.items() if v is not None})
-                      return dict(backdrop_state)
-                  if method == "host.ui.toast":
-                      check_text(params.get("message", ""), locale, f"{locale} toast", allow_fixture=True)
-                      toasts.append(params)
-                      return {"ok": True, "shown": True}
-                  if method == "host.ui.toggle_panel":
-                      panel_state["open"] = not panel_state["open"]
-                      return {"ok": True, "open": panel_state["open"]}
-                  if method == "host.ui.open_panel":
-                      panel_state["open"] = True
-                      return {"ok": True}
-                  if method == "host.ui.close_panel":
-                      panel_state["open"] = False
-                      return {"ok": True}
-                  if method == "host.ui.open_dialog":
-                      if dialog_mode["state"] == "error":
-                          return {"__rpc_error__": {"code": -32601, "message": "dialog unavailable"}}
-                      if dialog_mode["state"] == "false":
-                          return {"ok": False}
-                      dialog_mode["seq"] += 1
-                      dialog_mode["token"] = f"dlg-{dialog_mode['seq']}"
-                      return {"ok": True, "dialog_token": dialog_mode["token"]}
-                  if method in ("host.ui.open_settings", "host.ui.close_dialog", "host.ui.refresh", "host.action.progress"):
-                      return {"ok": True}
-                  if method == "host.perf.snapshot":
-                      return {"rss_bytes": 42 * 1024 * 1024, "note_count": len(notes)}
-                  raise ValueError(f"Unexpected host request: {method}")
+          function declaredSurfaces(manifest) {
+            const surfaces = [...(manifest.surfaces || [])];
+            const contributes = manifest.contributes || {};
+            for (const sec of contributes.settings_sections || []) surfaces.push(`settings_section:${sec.id}`);
+            for (const panel of contributes.panels || []) surfaces.push(`panel:${panel.id}`);
+            for (const sec of contributes.sidebar_sections || []) surfaces.push(`sidebar_section:${sec.id}`);
+            for (const dlg of contributes.dialogs || []) surfaces.push(`dialog:${dlg.id}`);
+            return surfaces;
+          }
 
-              env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "COMSPEC") if k in os.environ}
-              env.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"})
-              process = subprocess.Popen(
-                  entry, cwd=pkg_dir, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                  text=True, encoding="utf-8",
-              )
-              replies = Queue()
+          function stripHtmlComments(text) {
+            return text.replace(/<!--[\s\S]*?-->/g, '');
+          }
 
-              def read_replies():
-                  for line in process.stdout:
-                      replies.put(line)
-                  replies.put(None)
+          function checkNoSymlinksTree(rootDir) {
+            const stack = [rootDir];
+            while (stack.length > 0) {
+              const cur = stack.pop();
+              for (const entry of fs.readdirSync(cur, { withFileTypes: true })) {
+                const full = path.join(cur, entry.name);
+                const st = fs.lstatSync(full);
+                requireCond(!st.isSymbolicLink(), `Symlink is not allowed in staged package: ${path.relative(rootDir, full)}`);
+                if (st.isDirectory()) {
+                  stack.push(full);
+                }
+              }
+            }
+          }
 
-              reader = Thread(target=read_replies, daemon=True)
-              reader.start()
-              request_id = 0
+          function collectFiles(rootDir, exts) {
+            const found = [];
+            const stack = [rootDir];
+            while (stack.length > 0) {
+              const cur = stack.pop();
+              for (const entry of fs.readdirSync(cur, { withFileTypes: true })) {
+                const full = path.join(cur, entry.name);
+                if (entry.isDirectory()) {
+                  stack.push(full);
+                } else if (entry.isFile() && exts.some((ext) => entry.name.endsWith(ext))) {
+                  found.push(full);
+                }
+              }
+            }
+            return found.sort();
+          }
 
-              def send(message):
-                  process.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
-                  process.stdin.flush()
+          function readStrictReadme(pkgDir, filename) {
+            const filePath = path.join(pkgDir, filename);
+            requireCond(fs.existsSync(filePath), `Missing ${filename}`);
+            const st = fs.lstatSync(filePath);
+            requireCond(!st.isSymbolicLink() && st.isFile(), `${filename} must be a non-symlink regular file`);
+            const raw = fs.readFileSync(filePath);
+            requireCond(raw.length <= MAX_README_BYTES, `${filename} exceeds ${MAX_README_BYTES} bytes`);
+            const decoder = new TextDecoder('utf-8', { fatal: true });
+            let text;
+            try {
+              text = decoder.decode(raw);
+            } catch (err) {
+              throw new Error(`${filename} must be valid UTF-8: ${err.message}`);
+            }
+            text = text.replace(/^\ufeff/, '').trim();
+            requireCond(Boolean(text), `${filename} must not be empty`);
+            return text;
+          }
 
-              def rpc(method, params=None):
-                  nonlocal request_id
-                  request_id += 1
-                  send({"id": request_id, "method": method, "params": params or {}})
-                  while True:
-                      try:
-                          line = replies.get(timeout=10)
-                      except Empty:
-                          raise ValueError(f"{locale}/{layout}: timed out during {method}") from None
-                      require(line is not None, f"{locale}/{layout}: plugin exited during {method}")
-                      message = json.loads(line)
-                      require(message.get("jsonrpc") == "2.0", f"{method}: invalid JSON-RPC version")
-                      if "method" in message:
-                          result = host(message["method"], message.get("params", {}))
-                          if "id" in message:
-                              if isinstance(result, dict) and "__rpc_error__" in result:
-                                  send({"id": message["id"], "error": result["__rpc_error__"]})
-                              else:
-                                  send({"id": message["id"], "result": result})
-                          continue
-                      require(message.get("id") == request_id, f"{method}: unexpected response id")
-                      require("error" not in message, f"{method}: {message.get('error')}")
-                      return message["result"]
+          function resolveEntryScript(pkgDir, manifest) {
+            const entry = manifest.entry;
+            requireCond(entry && typeof entry === 'object' && !Array.isArray(entry), 'manifest.entry must be an object');
+            const jsRel = entry.js;
+            requireCond(typeof jsRel === 'string' && jsRel.trim() !== '', 'manifest.entry.js must be a non-empty string');
+            requireCond(jsRel === jsRel.trim(), 'manifest.entry.js must not have leading/trailing whitespace');
+            requireCond(!jsRel.includes('\0') && !jsRel.includes(':'), `Invalid entry.js: ${jsRel}`);
 
-              try:
-                  init = rpc("plugin.initialize", {
-                      "locale": locale, "data_dir": str(data_dir), "downloads_dir": str(downloads),
-                      "notebook_root": str(notebook), "ui_capabilities": capabilities,
-                      "theme": "light", "tarot": False,
-                  })
-                  require(init.get("ready") is True, f"{locale}/{layout}: plugin is not ready")
-                  require(backdrop_state["enabled"] is (layout != "legacy"),
-                          f"{locale}/{layout}: default or saved backdrop setting not applied at initialization")
-                  pages_by_surface = {}
-                  for surface in surfaces:
-                      initial = rpc("plugin.render", {"surface": surface})["page"]
-                      check_text(initial, locale, f"{locale}/{layout} {surface} initial page", allow_fixture=True)
-                      title = initial.get("title")
-                      require(isinstance(title, str) and title.strip(), f"{locale}/{layout} {surface}: missing page title")
-                      pages_by_surface[surface] = initial
-                      count = check_renders(rpc, locale, surface)
-                      print(f"{locale}/{layout} {surface}: {count} renders passed")
-                  if actions:
-                      settings_surface = "settings_page"
-                      rpc("plugin.render", {"surface": settings_surface, "values": {"bg_enabled": False}})
-                      require(backdrop_state["enabled"] is False and storage["config"]["bg_enabled"] is False,
-                              f"{locale}: turning off the backdrop in settings did not immediately apply and persist")
-                      rpc("plugin.render", {"surface": settings_surface, "values": {"bg_enabled": True}})
-                      require(backdrop_state["enabled"] is True and backdrop_state["density"] == "medium",
-                              f"{locale}: backdrop settings did not immediately apply")
-                      for cmd in commands:
-                          if cmd["id"] == "open_flush_dialog":
-                              continue
-                          res = rpc("plugin.command", {"command_id": cmd["id"], "context": {"note": NOTE_NAME, "source": "palette"}})
-                          check_text(res, locale, f"{locale} command {cmd['id']}", allow_fixture=True)
-                      # Regression: non-destructive drop with active selection MUST preserve selected text.
-                      res_nd = rpc("plugin.command", {"command_id": "drop_here", "context": {"note": "WrapTarget.md", "source": "palette"}})
-                      require(res_nd.get("ok") is True and "first\n\nsecond" in notes["WrapTarget.md"],
-                              f"{locale}: drop_here overwrote active selection")
-                      # Regression: wrap selection then flush MUST restore wrapped text byte-for-byte.
-                      rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
-                      before_wrap = notes["WrapTarget.md"]
-                      res_wrap = rpc("plugin.command", {"command_id": "poopify_selection", "context": {"note": "WrapTarget.md", "selection": "first\n\nsecond", "source": "editor_menu"}})
-                      require(res_wrap.get("ok") is True and "block-poop-everywhere:drop:wrap-start" in notes["WrapTarget.md"] and "block-poop-everywhere:drop:wrap-end" in notes["WrapTarget.md"],
-                              f"{locale}: poopify_selection did not emit lossless wrap markers")
-                      require("[poop:" not in notes["WrapTarget.md"], f"{locale}: drop output should not leak raw [poop:*] tags")
-                      res_unwrap = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "WrapTarget.md", "source": "sidebar_menu"}})
-                      require(res_unwrap.get("ok") is True and notes["WrapTarget.md"] == before_wrap,
-                              f"{locale}: wrap->flush round-trip altered user text: {notes['WrapTarget.md']!r} != {before_wrap!r}")
-                      # Regression: legacy [poop:classic] markers from v1.0.0/v1.0.1 are still cleanly flushed without swallowing user blank lines.
-                      notes["A.md"] = "# Normal Note\n\n> [poop:classic] legacy drop <!-- block-poop-everywhere:drop -->\n"
-                      res_leg = rpc("plugin.command", {"command_id": "flush_note", "context": {"note": "A.md", "source": "sidebar_menu"}})
-                      require(res_leg.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"] and notes["A.md"] == "# Normal Note\n\n",
-                              f"{locale}: legacy drop flush failed: {notes['A.md']!r}")
-                      # Regression: sidebar_menu preserves leading space and never touches wrong note or falls back.
-                      res_space = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": " A.md", "source": "sidebar_menu"}})
-                      require(res_space.get("ok") is True, f"{locale}: sidebar drop on ' A.md' failed")
-                      require("block-poop-everywhere:drop" in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["A.md"],
-                              f"{locale}: sidebar_menu wrote wrong note")
-                      res_empty = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": "", "source": "sidebar_menu"}})
-                      require(res_empty.get("ok") is False, f"{locale}: empty sidebar_menu target must not fall back")
-                      # Regression: uppercase .MD and .markdown notes produce valid open_target action IDs.
-                      for ext_note in ("Notes.MD", "Extra.markdown"):
-                          r_ext = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"note": ext_note, "source": "sidebar_menu"}})
-                          require(r_ext.get("ok") is True, f"{locale}: drop failed on {ext_note}")
-                      panel_page = rpc("plugin.render", {"surface": "panel:poop-board"})["page"]
-                      panel_entries = panel_page["cards"][1]["items"][0]["entries"]
-                      by_title = {e["title"]: e for e in panel_entries}
-                      for ext_note in ("Notes.MD", "Extra.markdown"):
-                          aid = by_title.get(ext_note, {}).get("action_id", "")
-                          require(aid.startswith("open_target:") and len(aid) == 28, f"{locale}: missing/invalid action_id for {ext_note}: {aid!r}")
-                      # Regression: theme.changed preserves base theme across Tarot toggle.
-                      for ev_params in (
-                          {"event": "note.saved", "path": NOTE_NAME, "notebook_root": str(notebook)},
-                          {"event": "note.opened", "path": NOTE_NAME},
-                          {"event": "theme.changed", "theme": "dark"},
-                          {"event": "theme.changed", "tarot": True},
-                          {"event": "theme.changed", "tarot": False},
-                          {"event": "locale.changed", "locale": locale},
-                      ):
-                          rpc("plugin.event", ev_params)
-                      settings_after_theme = rpc("plugin.render", {"surface": "settings_page"})["page"]
-                      require(len(settings_after_theme["cards"]) == 1, f"{locale}: settings page should stay on one card")
-                      # Regression: invalid archive_dir must return explicit error (no silent Downloads fallback).
-                      bad_export = rpc("plugin.action", {
-                          "action_id": "export_guide",
-                          "surface": "settings_page",
-                          "values": {"archive_dir": str(root / "does-not-exist")},
-                      })
-                      require(bad_export.get("ok") is False, f"{locale}: invalid archive_dir should fail export_guide")
-                      rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"archive_dir": ""}})
-                      for act_id, surface in (
-                          ("drop_now", "settings_page"),
-                          ("rescan_notes", "settings_page"),
-                          ("demo_toasts", "settings_page"),
-                          ("export_guide", "settings_page"),
-                          ("sidebar_drop", "sidebar_section:today-drops"),
-                          ("panel_drop", "panel:poop-board"),
-                      ):
-                          res = rpc("plugin.action", {"action_id": act_id, "surface": surface, "values": {}})
-                          require(res.get("ok") is True, f"{locale} action {act_id}: expected ok=True, got {res}")
-                          check_text(res, locale, f"{locale} action {act_id}", allow_fixture=True)
-                      # Regression: clicking rendered log_list action opens bound notebook+note.
-                      sb_page = rpc("plugin.render", {"surface": "sidebar_section:today-drops"})["page"]
-                      sidebar_buttons = sb_page["cards"][0]["items"][1]["buttons"]
-                      require([button["id"] for button in sidebar_buttons] == ["sidebar_drop"],
-                              f"{locale}: sidebar should only offer the drop button")
-                      log_entries = sb_page["cards"][0]["items"][0]["entries"]
-                      require(log_entries and log_entries[0].get("action_id", "").startswith("open_target:"),
-                              f"{locale}: sidebar drop list missing open_target action_id")
-                      open_res = rpc("plugin.action", {"action_id": log_entries[0]["action_id"], "surface": "sidebar_section:today-drops", "values": {}})
-                      require(open_res.get("ok") is True and opened_notes, f"{locale}: open_target did not invoke host.notes.open")
-                      # Regression: pure dialog render MUST NOT mint a flush token.
-                      rpc("plugin.render", {"surface": "dialog:flush-confirm"})
-                      stale_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
-                      require(stale_res.get("ok") is False, f"{locale}: pure dialog render must not authorize flush")
-                      # Regression: unavailable dialog (RPC error or ok:false) must NEVER silently flush or authorize flush.
-                      for bad_mode in ("error", "false"):
-                          dialog_mode["state"] = bad_mode
-                          abort_res = rpc("plugin.action", {"action_id": "open_flush", "surface": "settings_page", "values": {}})
-                          dialog_mode["state"] = "ok"
-                          require(abort_res.get("ok") is False, f"{locale}: open_flush must fail when dialog mode={bad_mode}")
-                          reject_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
-                          require(reject_res.get("ok") is False, f"{locale}: confirm must reject after failed open_flush ({bad_mode})")
-                      require("block-poop-everywhere:drop" in notes[" A.md"], f"{locale}: failed dialog paths deleted notes")
-                      # Regression: panel_flush_page with no active note MUST NOT touch notes.list[0].
-                      active_note_state["path"] = ""
-                      no_active_flush = rpc("plugin.action", {"action_id": "panel_flush_page", "surface": "panel:poop-board", "values": {}})
-                      active_note_state["path"] = NOTE_NAME
-                      require(no_active_flush.get("ok") is False and "block-poop-everywhere:drop" in notes[" A.md"],
-                              f"{locale}: panel_flush_page modified unrelated note when active note was empty")
-                      # Regression: file append on no-EOL, newline-only, and mixed-EOL notes round-trips byte-for-byte on flush.
-                      for special_note in ("NoEOL.md", "OnlyLF.md", "MixedEOL.md"):
-                          sp_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": special_note}})
-                          require(sp_drop.get("ok") is True, f"{locale}: {special_note} sidebar drop failed: {sp_drop}")
-                      # Regression: non-block-lossless selections (\nA\r, A\n\n\n\nB, > A\n\n> B, > A\nlazy, > A\nlazy\n\n> B) must be refused without mutating note.
-                      for bad_sel in ("\nA\r", "A\n\n\n\nB", "> A\n\n> B", "> A\nlazy", "> A\nlazy\n\n> B"):
-                          before_wrap = notes["WrapTarget.md"]
-                          bad_wrap = rpc("plugin.command", {
-                              "command_id": "poopify_selection",
-                              "context": {"source": "editor_menu", "note": "WrapTarget.md", "selection": bad_sel},
-                          })
-                          require(bad_wrap.get("ok") is False and notes["WrapTarget.md"] == before_wrap,
-                                  f"{locale}: unsafe selection {bad_sel!r} should be refused without mutation: {bad_wrap}")
-                      # Regression: custom Markdown-opener / backslash / backtick captions stay countable and cleanly flushable.
-                      for bad_cap in ("# Heading", "- bullet", "foo\\", "foo `tick"):
-                          rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"caption": bad_cap}})
-                          cap_drop = rpc("plugin.command", {"command_id": "drop_in_note", "context": {"source": "sidebar_menu", "note": "A.md"}})
-                          require(cap_drop.get("ok") is True, f"{locale}: drop failed for caption {bad_cap!r}")
-                          cap_flush = rpc("plugin.command", {"command_id": "flush_note", "context": {"source": "sidebar_menu", "note": "A.md"}})
-                          require(cap_flush.get("ok") is True and "block-poop-everywhere:drop" not in notes["A.md"],
-                                  f"{locale}: flush left marker for caption {bad_cap!r}: {notes['A.md']!r}")
-                      rpc("plugin.action", {"action_id": "save_prefs", "surface": "settings_page", "values": {"caption": ""}})
-                      # Real host-bound dialog open -> stale/padded/missing/wrong-surface tokens all rejected (confirm & keep) -> current token succeeds -> replay rejected.
-                      open_dlg_1 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
-                      require(open_dlg_1.get("ok") is True, f"{locale}: open_flush_dialog #1 failed: {open_dlg_1}")
-                      tok1 = dialog_mode["token"]
-                      open_dlg_2 = rpc("plugin.command", {"command_id": "open_flush_dialog", "context": {"source": "palette"}})
-                      require(open_dlg_2.get("ok") is True, f"{locale}: open_flush_dialog #2 failed: {open_dlg_2}")
-                      tok2 = dialog_mode["token"]
-                      require(tok1 != tok2, f"{locale}: expected fresh dialog token")
-                      stale_keep = rpc("plugin.action", {"action_id": "dialog_keep", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
-                      require(stale_keep.get("ok") is False, f"{locale}: stale dialog_keep {tok1} must be rejected without revoking {tok2}")
-                      wrong_surf_keep = rpc("plugin.action", {"action_id": "dialog_keep", "surface": "panel:poop-board", "values": {}, "dialog_token": tok2})
-                      require(wrong_surf_keep.get("ok") is False, f"{locale}: non-dialog dialog_keep must be rejected")
-                      bad_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok1})
-                      require(bad_tok.get("ok") is False, f"{locale}: stale dialog_token {tok1} must be rejected after {tok2}")
-                      padded_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": f" {tok2} "})
-                      require(padded_tok.get("ok") is False, f"{locale}: whitespace-padded dialog_token must be rejected")
-                      missing_tok = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}})
-                      require(missing_tok.get("ok") is False, f"{locale}: missing dialog_token must be rejected")
-                      wrong_surf = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "panel:poop-board", "values": {}, "dialog_token": tok2})
-                      require(wrong_surf.get("ok") is False, f"{locale}: non-dialog surface confirm must be rejected")
-                      flush_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
-                      require(flush_res.get("ok") is True, f"{locale} dialog_flush_confirm failed: {flush_res}")
-                      require(backdrop_state["enabled"] is True and storage["config"]["bg_enabled"] is True,
-                              f"{locale}: flushing note markers changed the backdrop setting")
-                      replay_res = rpc("plugin.action", {"action_id": "dialog_flush_confirm", "surface": "dialog:flush-confirm", "values": {}, "dialog_token": tok2})
-                      require(replay_res.get("ok") is False, f"{locale}: duplicate confirm replay must be rejected")
-                      # Regression: all CommonMark protected containers + U+2028 MUST survive flush byte-for-byte.
-                      for sample in protected_samples:
-                          require(sample in notes[NOTE_NAME], f"{locale}: flush corrupted protected sample: {sample!r}")
-                      require(notes["NoEOL.md"] == "A", f"{locale}: NoEOL.md did not round-trip byte-for-byte: {notes['NoEOL.md']!r}")
-                      require(notes["OnlyLF.md"] == "\n", f"{locale}: OnlyLF.md did not round-trip byte-for-byte: {notes['OnlyLF.md']!r}")
-                      require(notes["MixedEOL.md"] == "A\n\r\n", f"{locale}: MixedEOL.md did not round-trip byte-for-byte: {notes['MixedEOL.md']!r}")
-                      require(notes["LegacyWrap1.md"] == "\nA\n", f"{locale}: LegacyWrap1.md did not round-trip byte-for-byte: {notes['LegacyWrap1.md']!r}")
-                      require(notes["LegacyWrap2.md"] == ">\n> A\n>\n", f"{locale}: LegacyWrap2.md did not round-trip byte-for-byte: {notes['LegacyWrap2.md']!r}")
-                      require("bom fence" in notes["BOMFence.md"], f"{locale}: flush corrupted UTF-8 BOM fenced code block")
-                      require("block-poop-everywhere:drop" not in notes[" A.md"] and "block-poop-everywhere:drop" not in notes["Notes.MD"],
-                              f"{locale}: flush left top-level plugin markers behind")
-                      # Regression: interleaved plugin.shutdown arriving while plugin awaits a host RPC is queued and answered cleanly.
-                      request_id += 1
-                      cmd_req_id = request_id
-                      send({"id": cmd_req_id, "method": "plugin.action", "params": {"action_id": "rescan_notes", "surface": "settings_page", "values": {}}})
-                      request_id += 1
-                      shut_req_id = request_id
-                      interleaved_sent = False
-                      got_cmd = False
-                      got_shut = False
-                      while not (got_cmd and got_shut):
-                          try:
-                              line = replies.get(timeout=10)
-                          except Empty:
-                              raise ValueError(f"{locale}/{layout}: timed out awaiting interleaved shutdown") from None
-                          require(line is not None, f"{locale}/{layout}: plugin exited prematurely during interleaved shutdown")
-                          message = json.loads(line)
-                          if "method" in message:
-                              if not interleaved_sent:
-                                  send({"id": shut_req_id, "method": "plugin.shutdown", "params": {}})
-                                  interleaved_sent = True
-                              result = host(message["method"], message.get("params", {}))
-                              if "id" in message:
-                                  if isinstance(result, dict) and "__rpc_error__" in result:
-                                      send({"id": message["id"], "error": result["__rpc_error__"]})
-                                  else:
-                                      send({"id": message["id"], "result": result})
-                              continue
-                          if message.get("id") == cmd_req_id:
-                              require("error" not in message and message["result"].get("ok") is True, f"{locale}: interleaved rescan failed: {message}")
-                              got_cmd = True
-                          elif message.get("id") == shut_req_id:
-                              require("error" not in message and message["result"].get("ok") is True, f"{locale}: interleaved shutdown failed: {message}")
-                              got_shut = True
-                      require(interleaved_sent, f"{locale}: rescan_notes did not issue host RPC")
-                      require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully after interleaved shutdown")
-                      return pages_by_surface
-                  require(rpc("plugin.shutdown").get("ok") is True, f"{locale}/{layout}: shutdown failed")
-                  require(process.wait(timeout=10) == 0, f"{locale}/{layout}: plugin exited unsuccessfully")
-                  return pages_by_surface
-              finally:
-                  if process.poll() is None:
-                      process.kill()
-                      process.wait()
-                  reader.join(timeout=1)
-                  process.stdin.close()
-                  process.stdout.close()
+            const normalized = jsRel.replace(/\\/g, '/');
+            requireCond(!normalized.startsWith('/') && !path.isAbsolute(jsRel), `entry.js must not be absolute: ${jsRel}`);
+            const rawParts = normalized.split('/').filter((p) => p !== '');
+            requireCond(!rawParts.includes('..'), `entry.js must not contain '..': ${jsRel}`);
+            requireCond(normalized !== '.' && normalized !== './' && !(rawParts.length === 1 && rawParts[0] === '.'), `entry.js must not be '.': ${jsRel}`);
 
-          def validate_staged_package(pkg_dir):
-              check_no_symlinks_tree(pkg_dir)
-              for py_path in sorted(pkg_dir.rglob("*.py")):
-                  if py_path.is_file():
-                      compile(py_path.read_bytes(), str(py_path), "exec")
+            const pkgRoot = fs.realpathSync(pkgDir);
+            const relParts = rawParts.filter((p) => p !== '.');
+            requireCond(relParts.length > 0, `Invalid relative entry.js: ${jsRel}`);
+            let cur = pkgDir;
+            for (let i = 0; i < relParts.length - 1; i += 1) {
+              cur = path.join(cur, relParts[i]);
+              requireCond(fs.existsSync(cur) && !fs.lstatSync(cur).isSymbolicLink() && fs.statSync(cur).isDirectory(), `entry.js parent missing or symlink: ${jsRel}`);
+            }
+            const target = path.join(cur, relParts[relParts.length - 1]);
+            requireCond(fs.existsSync(target) && !fs.lstatSync(target).isSymbolicLink() && fs.statSync(target).isFile(), `entry.js must be a regular file: ${jsRel}`);
+            const resolved = fs.realpathSync(target);
+            requireCond(resolved.startsWith(pkgRoot + path.sep), `entry.js escapes dist package: ${jsRel}`);
+            return resolved;
+          }
 
-              # Regression: split_md_lines stays O(N) on large LF-only files.
-              import importlib.util, time as _time
-              _spec = importlib.util.spec_from_file_location("_poop_perf_check", str(pkg_dir / "main.py"))
-              _mod = importlib.util.module_from_spec(_spec)
-              _spec.loader.exec_module(_mod)
-              _t0 = _time.perf_counter()
-              _big_lines = _mod.split_md_lines("hello line\n" * 160_000)
-              _dt = _time.perf_counter() - _t0
-              require(len(_big_lines) == 160_000 and _dt < 2.0, f"split_md_lines performance regression: {_dt:.2f}s")
+          function* iterControls(value) {
+            if (Array.isArray(value)) {
+              for (const child of value) yield* iterControls(child);
+            } else if (value && typeof value === 'object') {
+              const kind = value.kind;
+              if (kind === 'segmented' || kind === 'select' || kind === 'switch') {
+                const choices = kind === 'switch' ? [false, true] : value.options.map((o) => o.value);
+                yield [value.id, value.value, choices];
+              }
+              for (const child of Object.values(value)) yield* iterControls(child);
+            }
+          }
 
-              # Regression: CommonMark v1.0.9 edge cases (nested refdef lazy cont, bq-list HTML close,
-              # inline link title protection, legacy v1.0.2 list wrap flush, nested bq wrap safety, O(N) bq refdefs).
-              _p = _mod.PoopEverywherePlugin()
-              _sig = "<!-- block-poop-everywhere:drop -->"
-              require(_p.count_markers(f"> > [r]: /u\n> example {_sig}\n") == 0, "nested refdef lazy cont must be protected")
-              require(_p.count_markers(f"> - <div>\n> drop {_sig}\n") == 1, "bq-list HTML block must close on dedent")
-              require(_p.count_markers(f'> [x](/url "caption\n> example {_sig}\n> tail")\n') == 0, "inline link title must be protected")
-              _lw3 = f"> [poop:wrap-start] cap {_sig}\n> - A\n> [poop:wrap-end] ··· {_sig}\n\n"
-              require(_p.count_markers(_lw3) == 2, "legacy v1.0.2 list wrap count mismatch")
-              _lw3_out, _lw3_rem = _p.strip_markers(_lw3)
-              require(_lw3_rem == 2 and _lw3_out == "> - A\n", f"legacy v1.0.2 list wrap flush mismatch: {_lw3_out!r}, {_lw3_rem}")
-              require(not _p.is_editor_wrap_safe("> > A\n> B"), "nested lazy bq depth drop must be refused")
-              _t1 = _time.perf_counter()
-              require(_p.count_markers("> [x]: /url\n" * 2000) == 0, "bq refdef batch count mismatch")
-              require(_time.perf_counter() - _t1 < 1.0, "bq refdef parsing regressed to O(N^2)")
+          async function checkRenders(rpc, locale, surface) {
+            const initial = (await rpc('plugin.render', { surface, values: {} })).page;
+            checkText(initial, locale, `${locale} ${surface} initial`, true);
+            const rendered = [...iterControls(initial)];
+            const base = Object.fromEntries(rendered.map(([k, cur]) => [k, cur]));
+            let count = 1;
+            for (const [k, cur, choices] of rendered) {
+              for (const choice of choices) {
+                if (choice === cur) continue;
+                const page = (await rpc('plugin.render', { surface, values: { ...base, [k]: choice } })).page;
+                checkText(page, locale, `${locale} ${surface} ${k}=${choice}`, true);
+                count += 1;
+              }
+            }
+            return count;
+          }
 
-              manifest_path = pkg_dir / "manifest.json"
-              require(not os.path.islink(manifest_path) and manifest_path.is_file(), "Staged package missing manifest.json")
-              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-              plugin_id = manifest.get("id")
-              require(isinstance(plugin_id, str) and plugin_id.strip(), "Missing manifest.id")
-              require(plugin_id.strip() != "block-diagnostics", "Reserved plugin id: block-diagnostics")
+          function createMockSDKFiles(tempDir) {
+            const sdkCode = `
+          import fs from 'node:fs';
 
-              for field in ("name", "summary"):
-                  translations = manifest.get(field)
-                  require(isinstance(translations, dict), f"manifest.{field} must be an object")
-                  for locale in ("zh", "en"):
-                      value = translations.get(locale)
-                      require(isinstance(value, str) and value.strip(), f"Missing manifest.{field}.{locale}")
-                      if locale == "en":
-                          require(not CHINESE.search(value), f"manifest.{field}.en: Chinese text in {value!r}")
-              check_text(manifest, "zh", "manifest")
-              check_contributes_en(manifest.get("contributes"))
-              check_contributes_en(manifest.get("permission_reasons"), "manifest.permission_reasons")
+          let seq = 1000;
+          const inboundQueue = [];
+          const waitBuf = new Int32Array(new SharedArrayBuffer(4));
+          let stdinCarry = Buffer.alloc(0);
 
-              zh_readme = read_strict_readme(pkg_dir, "README.md")
-              en_readme = read_strict_readme(pkg_dir, "README.en.md")
-              require(HAN.search(strip_html_comments(zh_readme)), "README.md must contain visible Chinese text")
-              require(not CHINESE.search(en_readme), "README.en.md must contain English-only text")
-              require(re.search(r"[A-Za-z]", strip_html_comments(en_readme)), "README.en.md must contain at least one visible ASCII letter")
-              check_text(zh_readme, "zh", "README.md")
-              check_text(en_readme, "en", "README.en.md")
-              require(zh_readme != en_readme, "The two README files must differ")
+          export class HostRPCError extends Error {
+            constructor(code, message) {
+              super(message);
+              this.name = 'HostRPCError';
+              this.code = code;
+            }
+          }
 
-              surfaces = declared_surfaces(manifest)
-              commands = (manifest.get("contributes") or {}).get("commands") or []
-              entry = resolve_entry_command(pkg_dir, manifest)
+          export function log(...args) {
+            const line = args.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' ');
+            fs.writeSync(2, line + '\\n');
+          }
 
-              def run_case(case):
-                  layout, capabilities, locale = case
-                  with TemporaryDirectory(prefix="block-poop-i18n-") as temp:
-                      return (layout, locale), run_plugin(
-                          entry, pkg_dir, locale, layout, capabilities, Path(temp), surfaces, commands, actions=(layout == "full")
-                      )
+          export function send(obj) {
+            fs.writeSync(1, JSON.stringify(obj) + '\\n');
+          }
 
-              cases = [
-                  (layout, capabilities, locale)
-                  for layout, capabilities in LAYOUTS.items()
-                  for locale in ("zh", "en")
-              ]
-              with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-                  pages_by_case = dict(pool.map(run_case, cases))
-              for layout in LAYOUTS:
-                  for surface in surfaces:
-                      require(
-                          pages_by_case[(layout, "zh")][surface]["title"]
-                          != pages_by_case[(layout, "en")][surface]["title"],
-                          f"{layout} {surface}: Chinese and English page titles must differ",
-                      )
-                      require(
-                          pages_by_case[(layout, "zh")][surface] != pages_by_case[(layout, "en")][surface],
-                          f"{layout} {surface}: Chinese and English rendered pages must differ",
-                      )
-              print("Bilingual release gate passed on staged dist package.")
+          export function notifyHost(method, params = {}) {
+            send({ jsonrpc: '2.0', method, params: params ?? {} });
+          }
 
-          repo = os.environ["REPO"]
-          event = os.environ["EVENT_NAME"]
-          ref_name = os.environ["REF_NAME"]
-          force = os.environ.get("FORCE") == "true"
-          shanghai = datetime.timezone(datetime.timedelta(hours=8))
+          function readMessageLine() {
+            const chunk = Buffer.alloc(4096);
+            while (true) {
+              const nlIdx = stdinCarry.indexOf(10);
+              if (nlIdx !== -1) {
+                const lineBuf = stdinCarry.subarray(0, nlIdx);
+                stdinCarry = stdinCarry.subarray(nlIdx + 1);
+                const trimmed = lineBuf.toString('utf8').trim();
+                if (!trimmed) continue;
+                try {
+                  const msg = JSON.parse(trimmed);
+                  if (msg && typeof msg === 'object' && !Array.isArray(msg)) return msg;
+                } catch {}
+                continue;
+              }
+              let n = 0;
+              try {
+                n = fs.readSync(0, chunk, 0, chunk.length, null);
+              } catch (err) {
+                if (err && err.code === 'EAGAIN') {
+                  Atomics.wait(waitBuf, 0, 0, 1);
+                  continue;
+                }
+                throw err;
+              }
+              if (n === 0) {
+                if (stdinCarry.length > 0) {
+                  const tail = stdinCarry.toString('utf8').trim();
+                  stdinCarry = Buffer.alloc(0);
+                  if (tail) {
+                    try {
+                      const msg = JSON.parse(tail);
+                      if (msg && typeof msg === 'object' && !Array.isArray(msg)) return msg;
+                    } catch {}
+                  }
+                }
+                return null;
+              }
+              stdinCarry = Buffer.concat([stdinCarry, chunk.subarray(0, n)]);
+            }
+          }
 
-          def sh(*args):
-              return subprocess.check_output(args, text=True).strip()
+          export function callHost(method, params = {}) {
+            seq += 1;
+            const reqId = \`p-\${seq}\`;
+            send({ jsonrpc: '2.0', id: reqId, method, params: params ?? {} });
+            while (true) {
+              const msg = readMessageLine();
+              if (msg === null) throw new Error('stdin closed while awaiting host response');
+              const isResponse = msg.id !== undefined && msg.id !== null && String(msg.id) === reqId && !msg.method && ('result' in msg || 'error' in msg);
+              if (isResponse) {
+                if (msg.error) {
+                  throw new HostRPCError(typeof msg.error.code === 'number' ? msg.error.code : -32000, msg.error.message || 'host error');
+                }
+                return msg.result ?? {};
+              }
+              inboundQueue.push(msg);
+            }
+          }
 
-          def summary(msg):
-              print(msg)
-              s_path = os.environ.get("GITHUB_STEP_SUMMARY")
-              if s_path:
-                  with open(s_path, "a", encoding="utf-8") as f:
-                      f.write(msg + "\n")
+          export function serve(handler) {
+            while (true) {
+              const req = inboundQueue.length > 0 ? inboundQueue.shift() : readMessageLine();
+              if (req === null) break;
+              const method = req.method;
+              if (typeof method !== 'string' || !method) continue;
+              const reqId = req.id;
+              const params = req.params && typeof req.params === 'object' && !Array.isArray(req.params) ? req.params : {};
+              try {
+                const result = handler(method, params, req);
+                if (reqId !== undefined && reqId !== null) {
+                  send({ jsonrpc: '2.0', id: reqId, result: result === undefined ? null : result });
+                }
+                if (method === 'plugin.shutdown') break;
+              } catch (err) {
+                if (reqId !== undefined && reqId !== null) {
+                  const message = err && err.message ? String(err.message) : String(err);
+                  const code = err && typeof err.code === 'number' ? err.code : -32000;
+                  send({ jsonrpc: '2.0', id: reqId, error: { code, message } });
+                }
+                if (method === 'plugin.shutdown') break;
+              }
+            }
+          }
+          `;
+            const loaderCode = `
+          export async function resolve(specifier, context, nextResolve) {
+            if (specifier === '/runtime/block-sdk.js') {
+              return { shortCircuit: true, url: new URL('./mock-sdk.mjs', import.meta.url).href };
+            }
+            return nextResolve(specifier, context);
+          }
+          `;
+            const registerCode = `
+          import { register } from 'node:module';
+          register(new URL('./mock-loader.mjs', import.meta.url));
+          `;
+            fs.writeFileSync(path.join(tempDir, 'mock-sdk.mjs'), sdkCode, 'utf8');
+            fs.writeFileSync(path.join(tempDir, 'mock-loader.mjs'), loaderCode, 'utf8');
+            fs.writeFileSync(path.join(tempDir, 'mock-register.mjs'), registerCode, 'utf8');
+            return path.join(tempDir, 'mock-register.mjs');
+          }
 
-          def set_output(**kwargs):
-              o_path = os.environ.get("GITHUB_OUTPUT")
-              if o_path:
-                  with open(o_path, "a", encoding="utf-8") as f:
-                      for k, v in kwargs.items():
-                          f.write(f"{k}={v}\n")
+          async function runPlugin({ entryScript, registerPath, pkgDir, locale, layout, capabilities, root, surfaces, commands, actions }) {
+            const notebook = path.join(root, NOTEBOOK_NAME);
+            const downloads = path.join(root, 'Downloads');
+            const dataDir = path.join(root, 'Data');
+            const archiveCustom = path.join(root, 'ArchiveCustom');
+            fs.mkdirSync(notebook, { recursive: true });
+            fs.mkdirSync(downloads, { recursive: true });
+            fs.mkdirSync(dataDir, { recursive: true });
+            fs.mkdirSync(archiveCustom, { recursive: true });
 
-          with open("manifest.json", encoding="utf-8") as f:
-              manifest = json.load(f)
-          assert manifest.get("app") == "blockmd", "manifest.app must be 'blockmd'"
-          plugin_id = manifest["id"].strip()
-          assert re.match(r"^[a-z0-9][a-z0-9-]{1,47}$", plugin_id), f"invalid id: {plugin_id}"
-          base_ver = manifest["version"].strip()
-          m_base = re.match(r"^(\d+)\.(\d+)\.(\d+)$", base_ver)
-          assert m_base, f"manifest.version must be X.Y.Z, got {base_ver}"
-          base_major, base_minor = int(m_base.group(1)), int(m_base.group(2))
-          plugin_title = (manifest.get("name", {}).get("en") or plugin_id).strip()
+            const protectedSamples = [
+              '> [poop:classic] user example <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] bq fence <!-- block-poop-everywhere:drop -->',
+              '  > [poop:classic] list fence <!-- block-poop-everywhere:drop -->',
+              ' \t> [poop:classic] tab indented <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] html block <!-- block-poop-everywhere:drop -->',
+              'LineBefore\u2028> [poop:classic] ls sep <!-- block-poop-everywhere:drop -->',
+              '>   > [poop:classic] bq list fence <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] bq tab fence <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] custom html7 <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] heading html7 <!-- block-poop-everywhere:drop -->',
+              '>     > [poop:classic] bq heading indented <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] nested lazy cont <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] multiline code span <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] nested lazy bare cont <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] code span lazy cont <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] code span ord2 <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] refdef list2 <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] nested ord2 lazy <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] bq list lazy <!-- block-poop-everywhere:drop -->',
+              '> [poop:classic] nested bq list lazy <!-- block-poop-everywhere:drop -->',
+              '> example \\<!-- block-poop-everywhere:drop -->',
+            ];
 
-          head_sha = sh("git", "rev-parse", "HEAD")
+            const notes = {
+              [NOTE_NAME]: (
+                '# Demo\n\n' +
+                `~~~md\n${protectedSamples[0]}\n~~~\n\n` +
+                `> \`\`\`md\n${protectedSamples[1]}\n> \`\`\`\n\n` +
+                `- \`\`\`md\n${protectedSamples[2]}\n  \`\`\`\n\n` +
+                `${protectedSamples[3]}\n\n` +
+                `<pre>\n${protectedSamples[4]}\n</pre>\n\n` +
+                `${protectedSamples[5]}\n\n` +
+                `> - \`\`\`md\n${protectedSamples[6]}\n>   \`\`\`\n\n` +
+                `>\t \`\`\`md\n${protectedSamples[7]}\n> \`\`\`\n\n` +
+                `<custom>\n${protectedSamples[8]}\n\n` +
+                `# HeadingBeforeCustom\n<custom>\n${protectedSamples[9]}\n\n` +
+                `> # HeadingInsideBQ\n${protectedSamples[10]}\n\n` +
+                `> > nested paragraph\n${protectedSamples[11]}\n\n` +
+                `> example \`start\n${protectedSamples[12]}\n> end\`\n\n` +
+                `> > nested bare\nlazy bare line\n${protectedSamples[13]}\n\n` +
+                `> span \`open\nlazy line inside span\n${protectedSamples[14]}\n> close\`\n\n` +
+                `> span \`open2\n> 2. not a list\n${protectedSamples[15]}\n> close2\`\n\n` +
+                `[r]: /url\n2. item\n   ${protectedSamples[16]}\n\n` +
+                `> > A\n> > 2. x\n${protectedSamples[17]}\n\n` +
+                `> - A\n${protectedSamples[18]}\n\n` +
+                `> > - A\n${protectedSamples[19]}\n\n` +
+                `${protectedSamples[20]}\n\n` +
+                'Hello Block.\n'
+              ),
+              'BOMFence.md': '\ufeff```md\n> [poop:classic] bom fence <!-- block-poop-everywhere:drop -->\n```\n',
+              ' A.md': '# Leading Space Note\n',
+              'A.md': '# Normal Note\n',
+              'Notes.MD': '# Uppercase Extension\n',
+              'Extra.markdown': '# Markdown Extension\n',
+              'NoEOL.md': 'A',
+              'OnlyLF.md': '\n',
+              'MixedEOL.md': 'A\n\r\n',
+              'LegacyWrap1.md': '> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n\nA\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->',
+              'LegacyWrap2.md': '> [poop:wrap-start] cap <!-- block-poop-everywhere:drop -->\n>\n> A\n>\n\n> [poop:wrap-end] ··· <!-- block-poop-everywhere:drop -->',
+              'WrapTarget.md': 'Intro\n\nfirst\n\nsecond\n\nOutro\n',
+            };
 
-          def parse_ver(tag):
-              m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)$", (tag or "").strip())
-              return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+            const storage = layout === 'legacy' ? { config: { bg_enabled: false } } : {};
+            const backdropState = {
+              enabled: layout === 'legacy',
+              id: 'poop-wallpaper',
+              pattern: 'scatter',
+              density: 'medium',
+              opacity: 0.1,
+              tint: 'accent',
+              dark_glow: false,
+            };
+            const badgesState = {};
+            const statusState = {};
+            const titlebarState = {};
+            const panelState = { open: false };
+            const dialogMode = { state: 'ok', seq: 0, token: '' };
+            const activeNoteState = { path: NOTE_NAME };
+            const activeSelection = { note: 'WrapTarget.md', text: 'first\n\nsecond' };
+            const toasts = [];
+            const openedNotes = [];
+            const fsOps = [];
+            const cryptoOps = [];
 
-          releases = []
-          page_num = 1
-          while True:
-              page = json.loads(sh("gh", "api", f"repos/{repo}/releases?per_page=100&page={page_num}"))
-              if not page:
-                  break
-              releases.extend(page)
-              if len(page) < 100:
-                  break
-              page_num += 1
-          stable = [r for r in releases if not r.get("draft") and not r.get("prerelease") and parse_ver(r.get("tag_name"))]
-          stable.sort(key=lambda r: parse_ver(r["tag_name"]))
-          previous = stable[-1] if stable else None
+            const noteRev = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
-          taken = {parse_ver(r.get("tag_name")) for r in releases if parse_ver(r.get("tag_name"))}
-          for t in sh("git", "tag", "--list", "v*").splitlines():
-              pv = parse_ver(t)
-              if pv:
-                  taken.add(pv)
+            function handleHost(method, params) {
+              if (method === 'host.storage.get') {
+                const k = params.key;
+                return { found: Object.prototype.hasOwnProperty.call(storage, k), value: storage[k] };
+              }
+              if (method === 'host.storage.set') {
+                storage[params.key] = params.value;
+                return { ok: true };
+              }
+              if (method === 'host.notebooks.list') {
+                return { notebooks: [{ path: notebook, name: NOTEBOOK_NAME, active: true }] };
+              }
+              if (method === 'host.notes.list') {
+                return {
+                  notes: Object.keys(notes).sort().map((p) => ({
+                    path: p,
+                    title: path.basename(p, path.extname(p)),
+                  })),
+                };
+              }
+              if (method === 'host.notes.read') {
+                const p = params.path;
+                requireCond(Object.prototype.hasOwnProperty.call(notes, p), `host.notes.read unknown path: ${p}`);
+                const content = notes[p];
+                return { content, revision: noteRev(content), dirty: false };
+              }
+              if (method === 'host.notes.write') {
+                const p = params.path;
+                const exp = params.expected_revision;
+                if (exp && Object.prototype.hasOwnProperty.call(notes, p) && noteRev(notes[p]) !== exp) {
+                  return { __rpc_error__: { code: -32006, message: 'revision conflict' } };
+                }
+                notes[p] = params.content;
+                return { ok: true, revision: noteRev(notes[p]) };
+              }
+              if (method === 'host.notes.active') {
+                const cur = activeNoteState.path;
+                if (!cur) return { active: false, path: '', title: '', notebook_root: notebook };
+                return { active: true, path: cur, title: path.basename(cur, path.extname(cur)), notebook_root: notebook };
+              }
+              if (method === 'host.notes.open') {
+                openedNotes.push([params.notebook_root || '', params.path]);
+                return { ok: true };
+              }
+              if (method === 'host.editor.selection') {
+                return { note: activeSelection.note, text: activeSelection.text, has_selection: Boolean(activeSelection.text) };
+              }
+              if (method === 'host.editor.insert') {
+                const target = params.note || NOTE_NAME;
+                const text = params.text || '';
+                const mode = params.mode || 'replace';
+                const cur = notes[target] || '';
+                const sel = activeSelection.note === target ? activeSelection.text : '';
+                if (sel && cur.includes(sel)) {
+                  if (mode === 'replace') {
+                    notes[target] = cur.replace(sel, text);
+                  } else {
+                    const idx = cur.indexOf(sel) + sel.length;
+                    notes[target] = cur.slice(0, idx) + text + cur.slice(idx);
+                  }
+                } else {
+                  notes[target] = cur + text;
+                }
+                return { ok: true, path: target };
+              }
+              if (method === 'host.titlebar.set_button') {
+                titlebarState[params.id || ''] = params;
+                return { ok: true };
+              }
+              if (method === 'host.status.set') {
+                statusState[params.id || ''] = params;
+                return { ok: true };
+              }
+              if (method === 'host.sidebar.set_badges') {
+                requireCond('badge_id' in params, 'host.sidebar.set_badges requires badge_id');
+                requireCond(Object.keys(params.entries || {}).length <= 512, 'host.sidebar.set_badges exceeded 512 entries');
+                if (params.clear) {
+                  for (const k of Object.keys(badgesState)) delete badgesState[k];
+                } else {
+                  if (!params.patch) {
+                    for (const k of Object.keys(badgesState)) delete badgesState[k];
+                  }
+                  for (const [rel, ent] of Object.entries(params.entries || {})) {
+                    if (ent === null) delete badgesState[rel];
+                    else badgesState[rel] = ent;
+                  }
+                }
+                return { ok: true, count: Object.keys(badgesState).length };
+              }
+              if (method === 'host.sidebar.get_badges') {
+                return { entries: { ...badgesState } };
+              }
+              if (method === 'host.ui.backdrop') {
+                return { ...backdropState };
+              }
+              if (method === 'host.ui.set_backdrop') {
+                for (const [k, v] of Object.entries(params)) {
+                  if (v !== null && v !== undefined) backdropState[k] = v;
+                }
+                return { ...backdropState };
+              }
+              if (method === 'host.ui.toast') {
+                checkText(params.message || '', locale, `${locale} toast`, true);
+                toasts.push(params);
+                return { ok: true, shown: true };
+              }
+              if (method === 'host.ui.toggle_panel') {
+                panelState.open = !panelState.open;
+                return { ok: true, open: panelState.open };
+              }
+              if (method === 'host.ui.open_panel') {
+                panelState.open = true;
+                return { ok: true };
+              }
+              if (method === 'host.ui.close_panel') {
+                panelState.open = false;
+                return { ok: true };
+              }
+              if (method === 'host.ui.open_dialog') {
+                if (dialogMode.state === 'error') {
+                  return { __rpc_error__: { code: -32601, message: 'dialog unavailable' } };
+                }
+                if (dialogMode.state === 'false') {
+                  return { ok: false };
+                }
+                dialogMode.seq += 1;
+                dialogMode.token = `dlg-${dialogMode.seq}`;
+                return { ok: true, dialog_token: dialogMode.token };
+              }
+              if (['host.ui.open_settings', 'host.ui.close_dialog', 'host.ui.refresh', 'host.action.progress'].includes(method)) {
+                return { ok: true };
+              }
+              if (method === 'host.perf.snapshot') {
+                return { rss_bytes: 42 * 1024 * 1024, note_count: Object.keys(notes).length };
+              }
+              if (method === 'host.fs.stat') {
+                fsOps.push(['stat', params]);
+                const p = String(params.path || '');
+                if (!fs.existsSync(p)) {
+                  return { exists: false, is_dir: false };
+                }
+                const st = fs.statSync(p);
+                return { exists: true, is_dir: st.isDirectory(), is_file: st.isFile(), size: st.size };
+              }
+              if (method === 'host.fs.mkdir') {
+                fsOps.push(['mkdir', params]);
+                fs.mkdirSync(params.path, { recursive: true });
+                return { ok: true };
+              }
+              if (method === 'host.fs.write') {
+                fsOps.push(['write', params]);
+                requireCond(params.atomic === true, 'host.fs.write expected atomic: true');
+                requireCond(params.mkdir_parents === true, 'host.fs.write expected mkdir_parents: true');
+                fs.mkdirSync(path.dirname(params.path), { recursive: true });
+                fs.writeFileSync(params.path, params.content, 'utf8');
+                return { ok: true, bytes: Buffer.byteLength(params.content, 'utf8') };
+              }
+              if (method === 'host.crypto.hash') {
+                cryptoOps.push(params);
+                requireCond(params.algorithm === 'sha256', `unexpected hash algorithm: ${params.algorithm}`);
+                const hex = crypto.createHash('sha256').update(String(params.text || ''), 'utf8').digest('hex');
+                return { hex };
+              }
+              throw new Error(`Unexpected host request: ${method}`);
+            }
 
-          def resolve_tag_sha(rel):
-              if not rel:
-                  return ""
-              tag = rel["tag_name"]
-              try:
-                  s = sh("git", "rev-parse", f"{tag}^{{commit}}")
-                  if re.match(r"^[0-9a-f]{40}$", s):
-                      return s
-              except Exception:
-                  pass
-              try:
-                  s = sh("gh", "api", f"repos/{repo}/commits/{tag}", "--jq", ".sha")
-                  if re.match(r"^[0-9a-f]{40}$", s):
-                      return s
-              except Exception:
-                  pass
-              return ""
+            const proc = spawn(process.execPath, ['--import', registerPath, entryScript], {
+              cwd: pkgDir,
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
 
-          if event == "push" and ref_name.startswith("v"):
-              pv = parse_ver(ref_name)
-              assert pv, f"Tag {ref_name} must match vX.Y.Z"
-              version = f"{pv[0]}.{pv[1]}.{pv[2]}"
-              tag = f"v{version}"
-              prev_for_notes = next((r for r in reversed(stable) if r["tag_name"] != tag), None)
-              prev_sha = resolve_tag_sha(prev_for_notes)
-          else:
-              if event == "schedule" and not force and previous and previous.get("published_at"):
-                  today = datetime.datetime.now(shanghai).strftime("%Y-%m-%d")
-                  pub_dt = datetime.datetime.fromisoformat(previous["published_at"].replace("Z", "+00:00")).astimezone(shanghai)
-                  if today == pub_dt.strftime("%Y-%m-%d"):
-                      summary(f"今日（{today}）已发布过 {previous['tag_name']}，每日定时最多自动发布一次，本次跳过。")
-                      set_output(should_release="no")
-                      sys.exit(0)
+            let stdoutCarry = '';
+            const lineQueue = [];
+            let lineWaiters = [];
+            let stderrBuf = '';
+            proc.stderr.on('data', (d) => { stderrBuf += d.toString('utf8'); });
+            proc.stdout.on('data', (chunk) => {
+              stdoutCarry += chunk.toString('utf8');
+              while (true) {
+                const idx = stdoutCarry.indexOf('\n');
+                if (idx === -1) break;
+                const line = stdoutCarry.slice(0, idx);
+                stdoutCarry = stdoutCarry.slice(idx + 1);
+                if (lineWaiters.length > 0) {
+                  const resolve = lineWaiters.shift();
+                  resolve(line);
+                } else {
+                  lineQueue.push(line);
+                }
+              }
+            });
+            const exitPromise = new Promise((resolve) => {
+              proc.on('close', (code) => {
+                while (lineWaiters.length > 0) {
+                  lineWaiters.shift()(null);
+                }
+                resolve(code);
+              });
+            });
 
-              prev_sha = resolve_tag_sha(previous)
-              if prev_sha and prev_sha == head_sha and not force:
-                  summary(f"当前 HEAD ({head_sha[:7]}) 与最新 Release {previous['tag_name']} 一致，跳过发版。")
-                  set_output(should_release="no")
-                  sys.exit(0)
+            function nextLine(timeoutMs = 10000) {
+              if (lineQueue.length > 0) return Promise.resolve(lineQueue.shift());
+              return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                  lineWaiters = lineWaiters.filter((w) => w !== onLine);
+                  reject(new Error(`${locale}/${layout}: timed out reading stdout (stderr=${stderrBuf})`));
+                }, timeoutMs);
+                function onLine(val) {
+                  clearTimeout(timer);
+                  resolve(val);
+                }
+                lineWaiters.push(onLine);
+              });
+            }
 
-              if prev_sha and not force:
-                  is_anc = subprocess.call(["git", "merge-base", "--is-ancestor", prev_sha, head_sha]) == 0
-                  if is_anc:
-                      changed = [
-                          p for p in sh("git", "diff", "--name-only", prev_sha, head_sha).splitlines()
-                          if p and not p.startswith(".github/") and p not in {".gitignore", "LICENSE"}
-                      ]
-                      if not changed:
-                          summary(f"自 {previous['tag_name']} 以来仅包含 CI 或仓库元数据变更，无需发包，本次跳过。")
-                          set_output(should_release="no")
-                          sys.exit(0)
-                      subjects = sh("git", "log", "--no-merges", "--format=%s", f"{prev_sha}..{head_sha}").splitlines()
-                      if subjects and all("[skip release]" in s.lower() for s in subjects):
-                          summary("区间内提交均标记 [skip release]，本次跳过。")
-                          set_output(should_release="no")
-                          sys.exit(0)
+            function sendMsg(msg) {
+              proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...msg }) + '\n');
+            }
 
-              commit_count = int(sh("git", "rev-list", "--count", head_sha))
-              cand = (base_major, base_minor, commit_count)
-              highest = max(taken) if taken else None
-              if highest and cand <= highest:
-                  cand = (highest[0], highest[1], highest[2] + 1)
-              while cand in taken:
-                  cand = (cand[0], cand[1], cand[2] + 1)
-              version = f"{cand[0]}.{cand[1]}.{cand[2]}"
-              tag = f"v{version}"
+            let requestId = 0;
+            async function rpc(method, params = {}) {
+              requestId += 1;
+              const myId = requestId;
+              sendMsg({ id: myId, method, params });
+              while (true) {
+                const line = await nextLine();
+                requireCond(line !== null, `${locale}/${layout}: plugin exited during ${method} (stderr=${stderrBuf})`);
+                const message = JSON.parse(line);
+                requireCond(message.jsonrpc === '2.0', `${method}: invalid jsonrpc`);
+                if ('method' in message) {
+                  const result = handleHost(message.method, message.params || {});
+                  if ('id' in message && message.id !== undefined && message.id !== null) {
+                    if (result && typeof result === 'object' && '__rpc_error__' in result) {
+                      sendMsg({ id: message.id, error: result.__rpc_error__ });
+                    } else {
+                      sendMsg({ id: message.id, result });
+                    }
+                  }
+                  continue;
+                }
+                requireCond(message.id === myId, `${method}: unexpected response id ${message.id}`);
+                requireCond(!('error' in message), `${method}: ${JSON.stringify(message.error)}`);
+                return message.result;
+              }
+            }
 
-          notes_lines = []
-          if prev_sha and prev_sha != head_sha and subprocess.call(["git", "merge-base", "--is-ancestor", prev_sha, head_sha]) == 0:
-              raw_log = sh("git", "log", "--no-merges", "--reverse", "--format=%h%x00%s", f"{prev_sha}..{head_sha}")
-              for line in raw_log.splitlines():
-                  if not line.strip():
-                      continue
-                  c_sha, subj = line.split("\x00", 1)
-                  if re.match(r"^(?:ci|docs)(?:\([^)]*\))?:\s", subj, re.I):
-                      continue
-                  notes_lines.append(f"- {subj} (`{c_sha}`)")
-          if not notes_lines:
-              notes_lines.append(f"- Automated release from `{head_sha[:7]}`.")
-          with open("release-notes.md", "w", encoding="utf-8") as f:
-              f.write("## Changes\n\n" + "\n".join(notes_lines) + "\n")
+            try {
+              const init = await rpc('plugin.initialize', {
+                locale,
+                data_dir: dataDir,
+                downloads_dir: downloads,
+                notebook_root: notebook,
+                ui_capabilities: capabilities,
+                theme: 'light',
+                tarot: false,
+              });
+              requireCond(init.ready === true, `${locale}/${layout}: ready !== true`);
+              requireCond(backdropState.enabled === (layout !== 'legacy'), `${locale}/${layout}: backdrop mismatch`);
 
-          pkg_dir = os.path.join("dist", plugin_id)
-          shutil.rmtree("dist", ignore_errors=True)
-          os.makedirs(pkg_dir, exist_ok=True)
-          tar_bytes = subprocess.check_output(["git", "archive", "--format=tar", head_sha])
-          subprocess.run(["tar", "-xf", "-", "-C", pkg_dir], input=tar_bytes, check=True)
-          shutil.rmtree(os.path.join(pkg_dir, ".github"), ignore_errors=True)
-          for meta_file in (".gitignore",):
-              p = os.path.join(pkg_dir, meta_file)
-              if not os.path.islink(p) and os.path.exists(p):
-                  os.remove(p)
+              const pagesBySurface = {};
+              for (const surface of surfaces) {
+                const initial = (await rpc('plugin.render', { surface })).page;
+                checkText(initial, locale, `${locale}/${layout} ${surface} initial`, true);
+                requireCond(typeof initial.title === 'string' && initial.title.trim(), `${surface}: missing title`);
+                pagesBySurface[surface] = initial;
+                const count = await checkRenders(rpc, locale, surface);
+                console.log(`${locale}/${layout} ${surface}: ${count} renders passed`);
+              }
 
-          try:
-              check_no_symlinks_tree(Path(pkg_dir))
-          except Exception as exc:
-              print(f"Bilingual release gate failed: {exc}", file=sys.stderr)
-              sys.exit(1)
+              if (actions) {
+                await rpc('plugin.render', { surface: 'settings_page', values: { bg_enabled: false } });
+                requireCond(backdropState.enabled === false && storage.config.bg_enabled === false, `${locale}: bg_enabled=false failed`);
+                await rpc('plugin.render', { surface: 'settings_page', values: { bg_enabled: true } });
+                requireCond(backdropState.enabled === true && backdropState.density === 'medium', `${locale}: bg_enabled=true failed`);
 
-          manifest["version"] = version
-          with open(os.path.join(pkg_dir, "manifest.json"), "w", encoding="utf-8") as f:
-              json.dump(manifest, f, ensure_ascii=False, indent=2)
-              f.write("\n")
+                for (const cmd of commands) {
+                  if (cmd.id === 'open_flush_dialog') continue;
+                  const res = await rpc('plugin.command', { command_id: cmd.id, context: { note: NOTE_NAME, source: 'palette' } });
+                  checkText(res, locale, `${locale} command ${cmd.id}`, true);
+                }
 
-          try:
-              validate_staged_package(Path(pkg_dir))
-          except Exception as exc:
-              print(f"Bilingual release gate failed: {exc}", file=sys.stderr)
-              sys.exit(1)
+                const resNd = await rpc('plugin.command', { command_id: 'drop_here', context: { note: 'WrapTarget.md', source: 'palette' } });
+                requireCond(resNd.ok === true && notes['WrapTarget.md'].includes('first\n\nsecond'), `${locale}: drop_here overwrote selection`);
 
-          archive_name = f"{plugin_id}-{tag}.tar.gz"
-          subprocess.check_call(["tar", "-czf", archive_name, "-C", "dist", plugin_id])
+                await rpc('plugin.command', { command_id: 'flush_note', context: { note: 'WrapTarget.md', source: 'sidebar_menu' } });
+                const beforeWrap = notes['WrapTarget.md'];
+                const resWrap = await rpc('plugin.command', {
+                  command_id: 'poopify_selection',
+                  context: { note: 'WrapTarget.md', selection: 'first\n\nsecond', source: 'editor_menu' },
+                });
+                requireCond(resWrap.ok === true && notes['WrapTarget.md'].includes('block-poop-everywhere:drop:wrap-start') && notes['WrapTarget.md'].includes('block-poop-everywhere:drop:wrap-end'), `${locale}: wrap failed`);
+                requireCond(!notes['WrapTarget.md'].includes('[poop:'), `${locale}: raw [poop: leaked`);
+                const resUnwrap = await rpc('plugin.command', { command_id: 'flush_note', context: { note: 'WrapTarget.md', source: 'sidebar_menu' } });
+                requireCond(resUnwrap.ok === true && notes['WrapTarget.md'] === beforeWrap, `${locale}: wrap round-trip mismatch`);
 
-          summary(f"准备发布 {plugin_title} {tag} (archive={archive_name}, commit={head_sha[:7]})")
-          set_output(
-              should_release="yes",
-              version=version,
-              tag=tag,
-              title=f"{plugin_title} {version}",
-              archive=archive_name,
-              head_sha=head_sha,
-          )
-          PY
+                notes['A.md'] = '# Normal Note\n\n> [poop:classic] legacy drop <!-- block-poop-everywhere:drop -->\n';
+                const resLeg = await rpc('plugin.command', { command_id: 'flush_note', context: { note: 'A.md', source: 'sidebar_menu' } });
+                requireCond(resLeg.ok === true && !notes['A.md'].includes('block-poop-everywhere:drop') && notes['A.md'] === '# Normal Note\n\n', `${locale}: legacy drop flush failed`);
+
+                const resSpace = await rpc('plugin.command', { command_id: 'drop_in_note', context: { note: ' A.md', source: 'sidebar_menu' } });
+                requireCond(resSpace.ok === true && notes[' A.md'].includes('block-poop-everywhere:drop') && !notes['A.md'].includes('block-poop-everywhere:drop'), `${locale}: leading space note mismatch`);
+                const resEmpty = await rpc('plugin.command', { command_id: 'drop_in_note', context: { note: '', source: 'sidebar_menu' } });
+                requireCond(resEmpty.ok === false, `${locale}: empty sidebar_menu target must not fall back`);
+
+                for (const extNote of ['Notes.MD', 'Extra.markdown']) {
+                  const rExt = await rpc('plugin.command', { command_id: 'drop_in_note', context: { note: extNote, source: 'sidebar_menu' } });
+                  requireCond(rExt.ok === true, `${locale}: drop failed on ${extNote}`);
+                }
+                const panelPage = (await rpc('plugin.render', { surface: 'panel:poop-board' })).page;
+                const byTitle = Object.fromEntries(panelPage.cards[1].items[0].entries.map((e) => [e.title, e]));
+                for (const extNote of ['Notes.MD', 'Extra.markdown']) {
+                  const aid = byTitle[extNote]?.action_id || '';
+                  requireCond(aid.startsWith('open_target:') && aid.length === 28, `${locale}: invalid action_id for ${extNote}: ${aid}`);
+                }
+                requireCond(cryptoOps.length > 0, `${locale}: expected host.crypto.hash to be called`);
+
+                for (const evParams of [
+                  { event: 'note.saved', path: NOTE_NAME, notebook_root: notebook },
+                  { event: 'note.opened', path: NOTE_NAME },
+                  { event: 'theme.changed', theme: 'dark' },
+                  { event: 'theme.changed', tarot: true },
+                  { event: 'theme.changed', tarot: false },
+                  { event: 'locale.changed', locale },
+                ]) {
+                  await rpc('plugin.event', evParams);
+                }
+
+                const badExport = await rpc('plugin.action', {
+                  action_id: 'export_guide',
+                  surface: 'settings_page',
+                  values: { archive_dir: path.join(root, 'does-not-exist') },
+                });
+                requireCond(badExport.ok === false, `${locale}: invalid archive_dir must fail`);
+
+                const customExport = await rpc('plugin.action', {
+                  action_id: 'export_guide',
+                  surface: 'settings_page',
+                  values: { archive_dir: archiveCustom },
+                });
+                requireCond(customExport.ok === true && fs.existsSync(customExport.reveal_path), `${locale}: custom archive_dir export failed`);
+
+                await rpc('plugin.action', { action_id: 'save_prefs', surface: 'settings_page', values: { archive_dir: '' } });
+
+                for (const [actId, surf] of [
+                  ['drop_now', 'settings_page'],
+                  ['rescan_notes', 'settings_page'],
+                  ['demo_toasts', 'settings_page'],
+                  ['export_guide', 'settings_page'],
+                  ['sidebar_drop', 'sidebar_section:today-drops'],
+                  ['panel_drop', 'panel:poop-board'],
+                ]) {
+                  const res = await rpc('plugin.action', { action_id: actId, surface: surf, values: {} });
+                  requireCond(res.ok === true, `${locale}: action ${actId} failed: ${JSON.stringify(res)}`);
+                  checkText(res, locale, `${locale} action ${actId}`, true);
+                  if (actId === 'export_guide') {
+                    requireCond(fs.existsSync(res.reveal_path), `${locale}: exported guide file missing on disk`);
+                    checkText(fs.readFileSync(res.reveal_path, 'utf8'), locale, `${locale} exported guide`, true);
+                  }
+                }
+                requireCond(fsOps.some(([op]) => op === 'mkdir') && fsOps.some(([op]) => op === 'write') && fsOps.some(([op]) => op === 'stat'), `${locale}: expected host.fs.mkdir/write/stat calls`);
+
+                const sbPage = (await rpc('plugin.render', { surface: 'sidebar_section:today-drops' })).page;
+                const logEntries = sbPage.cards[0].items[0].entries;
+                requireCond(logEntries.length > 0 && logEntries[0].action_id.startsWith('open_target:'), `${locale}: sidebar missing open_target`);
+                const openRes = await rpc('plugin.action', { action_id: logEntries[0].action_id, surface: 'sidebar_section:today-drops', values: {} });
+                requireCond(openRes.ok === true && openedNotes.length > 0, `${locale}: open_target failed`);
+
+                await rpc('plugin.render', { surface: 'dialog:flush-confirm' });
+                const staleRes = await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {} });
+                requireCond(staleRes.ok === false, `${locale}: pure render must not authorize flush`);
+
+                for (const badMode of ['error', 'false']) {
+                  dialogMode.state = badMode;
+                  const abortRes = await rpc('plugin.action', { action_id: 'open_flush', surface: 'settings_page', values: {} });
+                  dialogMode.state = 'ok';
+                  requireCond(abortRes.ok === false, `${locale}: open_flush must fail for ${badMode}`);
+                  const rejRes = await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {} });
+                  requireCond(rejRes.ok === false, `${locale}: confirm must reject after ${badMode}`);
+                }
+
+                activeNoteState.path = '';
+                const noActiveFlush = await rpc('plugin.action', { action_id: 'panel_flush_page', surface: 'panel:poop-board', values: {} });
+                activeNoteState.path = NOTE_NAME;
+                requireCond(noActiveFlush.ok === false && notes[' A.md'].includes('block-poop-everywhere:drop'), `${locale}: panel_flush_page touched wrong note`);
+
+                for (const sp of ['NoEOL.md', 'OnlyLF.md', 'MixedEOL.md']) {
+                  const spDrop = await rpc('plugin.command', { command_id: 'drop_in_note', context: { source: 'sidebar_menu', note: sp } });
+                  requireCond(spDrop.ok === true, `${locale}: ${sp} drop failed`);
+                }
+
+                for (const badSel of ['\nA\r', 'A\n\n\n\nB', '> A\n\n> B', '> A\nlazy', '> A\nlazy\n\n> B']) {
+                  const bw = notes['WrapTarget.md'];
+                  const badWrap = await rpc('plugin.command', { command_id: 'poopify_selection', context: { source: 'editor_menu', note: 'WrapTarget.md', selection: badSel } });
+                  requireCond(badWrap.ok === false && notes['WrapTarget.md'] === bw, `${locale}: unsafe selection mutated note`);
+                }
+
+                for (const badCap of ['# Heading', '- bullet', 'foo\\', 'foo `tick']) {
+                  await rpc('plugin.action', { action_id: 'save_prefs', surface: 'settings_page', values: { caption: badCap } });
+                  const cd = await rpc('plugin.command', { command_id: 'drop_in_note', context: { source: 'sidebar_menu', note: 'A.md' } });
+                  requireCond(cd.ok === true, `${locale}: cap drop failed for ${badCap}`);
+                  const cf = await rpc('plugin.command', { command_id: 'flush_note', context: { source: 'sidebar_menu', note: 'A.md' } });
+                  requireCond(cf.ok === true && !notes['A.md'].includes('block-poop-everywhere:drop'), `${locale}: cap flush failed for ${badCap}`);
+                }
+                await rpc('plugin.action', { action_id: 'save_prefs', surface: 'settings_page', values: { caption: '' } });
+
+                const d1 = await rpc('plugin.command', { command_id: 'open_flush_dialog', context: { source: 'palette' } });
+                requireCond(d1.ok === true, `${locale}: open_flush_dialog #1 failed`);
+                const tok1 = dialogMode.token;
+                const d2 = await rpc('plugin.command', { command_id: 'open_flush_dialog', context: { source: 'palette' } });
+                requireCond(d2.ok === true, `${locale}: open_flush_dialog #2 failed`);
+                const tok2 = dialogMode.token;
+                requireCond(tok1 !== tok2, `${locale}: expected fresh token`);
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_keep', surface: 'dialog:flush-confirm', values: {}, dialog_token: tok1 })).ok === false, 'stale keep must fail');
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_keep', surface: 'panel:poop-board', values: {}, dialog_token: tok2 })).ok === false, 'wrong surface keep must fail');
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {}, dialog_token: tok1 })).ok === false, 'stale confirm must fail');
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {}, dialog_token: ` ${tok2} ` })).ok === false, 'padded token must fail');
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {} })).ok === false, 'missing token must fail');
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'panel:poop-board', values: {}, dialog_token: tok2 })).ok === false, 'wrong surface confirm must fail');
+                const flushRes = await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {}, dialog_token: tok2 });
+                requireCond(flushRes.ok === true && backdropState.enabled === true && storage.config.bg_enabled === true, `${locale}: flush failed or changed backdrop`);
+                requireCond((await rpc('plugin.action', { action_id: 'dialog_flush_confirm', surface: 'dialog:flush-confirm', values: {}, dialog_token: tok2 })).ok === false, 'replay must fail');
+
+                for (const sample of protectedSamples) {
+                  requireCond(notes[NOTE_NAME].includes(sample), `${locale}: protected sample corrupted: ${sample}`);
+                }
+                requireCond(notes['NoEOL.md'] === 'A', 'NoEOL.md mismatch');
+                requireCond(notes['OnlyLF.md'] === '\n', 'OnlyLF.md mismatch');
+                requireCond(notes['MixedEOL.md'] === 'A\n\r\n', 'MixedEOL.md mismatch');
+                requireCond(notes['LegacyWrap1.md'] === '\nA\n', 'LegacyWrap1.md mismatch');
+                requireCond(notes['LegacyWrap2.md'] === '>\n> A\n>\n', 'LegacyWrap2.md mismatch');
+                requireCond(notes['BOMFence.md'].includes('bom fence'), 'BOMFence.md mismatch');
+                requireCond(!notes[' A.md'].includes('block-poop-everywhere:drop') && !notes['Notes.MD'].includes('block-poop-everywhere:drop'), 'top-level markers left behind');
+
+                requestId += 1;
+                const cmdReqId = requestId;
+                sendMsg({ id: cmdReqId, method: 'plugin.action', params: { action_id: 'rescan_notes', surface: 'settings_page', values: {} } });
+                requestId += 1;
+                const shutReqId = requestId;
+                let interleavedSent = false;
+                let gotCmd = false;
+                let gotShut = false;
+                while (!(gotCmd && gotShut)) {
+                  const line = await nextLine();
+                  requireCond(line !== null, `${locale}: premature exit during interleaved shutdown`);
+                  const msg = JSON.parse(line);
+                  if ('method' in msg) {
+                    if (!interleavedSent) {
+                      sendMsg({ id: shutReqId, method: 'plugin.shutdown', params: {} });
+                      interleavedSent = true;
+                    }
+                    const result = handleHost(msg.method, msg.params || {});
+                    if ('id' in msg && msg.id !== undefined && msg.id !== null) {
+                      sendMsg({ id: msg.id, result });
+                    }
+                    continue;
+                  }
+                  if (msg.id === cmdReqId) {
+                    requireCond(!msg.error && msg.result.ok === true, `${locale}: interleaved rescan failed`);
+                    gotCmd = true;
+                  } else if (msg.id === shutReqId) {
+                    requireCond(!msg.error && msg.result.ok === true, `${locale}: interleaved shutdown failed`);
+                    gotShut = true;
+                  }
+                }
+                requireCond(interleavedSent, `${locale}: rescan did not issue host RPC`);
+                const exitCode = await exitPromise;
+                requireCond(exitCode === 0, `${locale}: exitCode=${exitCode}`);
+                return pagesBySurface;
+              }
+
+              const shut = await rpc('plugin.shutdown');
+              requireCond(shut.ok === true, `${locale}/${layout}: shutdown failed`);
+              const exitCode = await exitPromise;
+              requireCond(exitCode === 0, `${locale}/${layout}: exitCode=${exitCode}`);
+              return pagesBySurface;
+            } finally {
+              if (proc.exitCode === null) proc.kill();
+            }
+          }
+
+          async function validateStagedPackage(pkgDir) {
+            checkNoSymlinksTree(pkgDir);
+            const pyFiles = collectFiles(pkgDir, ['.py']);
+            requireCond(pyFiles.length === 0, `Python files are no longer allowed in staged package: ${pyFiles.join(', ')}`);
+
+            const jsFiles = collectFiles(pkgDir, ['.js', '.mjs']);
+            requireCond(jsFiles.length > 0, 'No JS files found in staged package');
+            for (const jsFile of jsFiles) {
+              execFileSync(process.execPath, ['--check', jsFile], { stdio: 'inherit' });
+            }
+
+            const mdMod = await import(pathToFileURL(path.join(pkgDir, 'markdown.js')).href);
+            const t0 = performance.now();
+            const bigLines = mdMod.splitMdLines('hello line\n'.repeat(160000));
+            const dt0 = performance.now() - t0;
+            requireCond(bigLines.length === 160000 && dt0 < 2000, `splitMdLines performance regression: ${dt0.toFixed(2)}ms`);
+
+            const sig = '<!-- block-poop-everywhere:drop -->';
+            requireCond(mdMod.countMarkers(`> > [r]: /u\n> example ${sig}\n`) === 0, 'nested refdef lazy cont must be protected');
+            requireCond(mdMod.countMarkers(`> - <div>\n> drop ${sig}\n`) === 1, 'bq-list HTML block must close on dedent');
+            requireCond(mdMod.countMarkers(`> [x](/url "caption\n> example ${sig}\n> tail")\n`) === 0, 'inline link title must be protected');
+            const lw3 = `> [poop:wrap-start] cap ${sig}\n> - A\n> [poop:wrap-end] ··· ${sig}\n\n`;
+            requireCond(mdMod.countMarkers(lw3) === 2, 'legacy v1.0.2 list wrap count mismatch');
+            const lw3Out = mdMod.stripMarkers(lw3);
+            requireCond(lw3Out.removed === 2 && lw3Out.content === '> - A\n', `legacy v1.0.2 list wrap flush mismatch: ${JSON.stringify(lw3Out)}`);
+            requireCond(!mdMod.isEditorWrapSafe('> > A\n> B'), 'nested lazy bq depth drop must be refused');
+            const t1 = performance.now();
+            requireCond(mdMod.countMarkers('> [x]: /url\n'.repeat(2000)) === 0, 'bq refdef batch count mismatch');
+            requireCond(performance.now() - t1 < 1000, 'bq refdef parsing regressed to O(N^2)');
+
+            const manifestPath = path.join(pkgDir, 'manifest.json');
+            requireCond(fs.existsSync(manifestPath) && !fs.lstatSync(manifestPath).isSymbolicLink() && fs.statSync(manifestPath).isFile(), 'Staged package missing manifest.json');
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const pluginId = manifest.id;
+            requireCond(typeof pluginId === 'string' && pluginId.trim(), 'Missing manifest.id');
+            requireCond(pluginId.trim() !== 'block-diagnostics', 'Reserved plugin id: block-diagnostics');
+
+            for (const field of ['name', 'summary']) {
+              const translations = manifest[field];
+              requireCond(translations && typeof translations === 'object' && !Array.isArray(translations), `manifest.${field} must be an object`);
+              for (const loc of ['zh', 'en']) {
+                const value = translations[loc];
+                requireCond(typeof value === 'string' && value.trim(), `Missing manifest.${field}.${loc}`);
+                if (loc === 'en') {
+                  requireCond(!CHINESE_RE.test(value), `manifest.${field}.en: Chinese text in ${JSON.stringify(value)}`);
+                }
+              }
+            }
+            requireCond(Array.isArray(manifest.permissions) && manifest.permissions.includes('system:fs'), 'manifest.permissions must include system:fs');
+            for (const perm of manifest.permissions) {
+              const reason = manifest.permission_reasons?.[perm];
+              requireCond(reason && typeof reason.zh === 'string' && reason.zh.trim() && typeof reason.en === 'string' && reason.en.trim(), `Missing permission_reasons for ${perm}`);
+              requireCond([...reason.zh].length <= 80, `permission_reasons.${perm}.zh exceeds 80 chars`);
+              requireCond([...reason.en].length <= 140, `permission_reasons.${perm}.en exceeds 140 chars`);
+            }
+            const bd = manifest.contributes?.block_decorators?.[0];
+            requireCond(bd && bd.id === 'poop-drop' && bd.default_callout === 'warning', 'manifest.contributes.block_decorators[0] invalid');
+            requireCond(bd.empty_placeholder?.zh && bd.empty_placeholder?.en, 'block_decorators missing empty_placeholder');
+
+            checkText(manifest, 'zh', 'manifest');
+            checkContributesEn(manifest.contributes);
+            checkContributesEn(manifest.permission_reasons, 'manifest.permission_reasons');
+
+            const zhReadme = readStrictReadme(pkgDir, 'README.md');
+            const enReadme = readStrictReadme(pkgDir, 'README.en.md');
+            requireCond(HAN_RE.test(stripHtmlComments(zhReadme)), 'README.md must contain visible Chinese text');
+            requireCond(!CHINESE_RE.test(enReadme), 'README.en.md must contain English-only text');
+            requireCond(/[A-Za-z]/.test(stripHtmlComments(enReadme)), 'README.en.md must contain at least one visible ASCII letter');
+            checkText(zhReadme, 'zh', 'README.md');
+            checkText(enReadme, 'en', 'README.en.md');
+            requireCond(zhReadme !== enReadme, 'The two README files must differ');
+
+            const surfaces = declaredSurfaces(manifest);
+            const commands = (manifest.contributes || {}).commands || [];
+            const entryScript = resolveEntryScript(pkgDir, manifest);
+
+            const sdkTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'block-poop-sdk-'));
+            try {
+              const registerPath = createMockSDKFiles(sdkTmp);
+              const cases = [];
+              for (const [layout, capabilities] of Object.entries(LAYOUTS)) {
+                for (const locale of ['zh', 'en']) {
+                  cases.push({ layout, capabilities, locale });
+                }
+              }
+              const results = await Promise.all(cases.map(async ({ layout, capabilities, locale }) => {
+                const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'block-poop-i18n-'));
+                try {
+                  const pages = await runPlugin({
+                    entryScript,
+                    registerPath,
+                    pkgDir,
+                    locale,
+                    layout,
+                    capabilities,
+                    root: temp,
+                    surfaces,
+                    commands,
+                    actions: layout === 'full',
+                  });
+                  return [`${layout}:${locale}`, pages];
+                } finally {
+                  fs.rmSync(temp, { recursive: true, force: true });
+                }
+              }));
+              const pagesByCase = Object.fromEntries(results);
+              for (const layout of Object.keys(LAYOUTS)) {
+                for (const surface of surfaces) {
+                  requireCond(
+                    pagesByCase[`${layout}:zh`][surface].title !== pagesByCase[`${layout}:en`][surface].title,
+                    `${layout} ${surface}: Chinese and English page titles must differ`
+                  );
+                  requireCond(
+                    JSON.stringify(pagesByCase[`${layout}:zh`][surface]) !== JSON.stringify(pagesByCase[`${layout}:en`][surface]),
+                    `${layout} ${surface}: Chinese and English rendered pages must differ`
+                  );
+                }
+              }
+            } finally {
+              fs.rmSync(sdkTmp, { recursive: true, force: true });
+            }
+            console.log('Bilingual release gate passed on staged dist package.');
+          }
+
+          function sh(cmd, args) {
+            return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
+          }
+
+          function shCall(cmd, args) {
+            try {
+              execFileSync(cmd, args, { stdio: 'ignore' });
+              return true;
+            } catch {
+              return false;
+            }
+          }
+
+          function summary(msg) {
+            console.log(msg);
+            const sPath = process.env.GITHUB_STEP_SUMMARY;
+            if (sPath) {
+              fs.appendFileSync(sPath, `${msg}\n`, 'utf8');
+            }
+          }
+
+          function setOutput(kv) {
+            const oPath = process.env.GITHUB_OUTPUT;
+            if (oPath) {
+              const lines = Object.entries(kv).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+              fs.appendFileSync(oPath, lines, 'utf8');
+            }
+          }
+
+          function parseVer(tag) {
+            const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(String(tag || '').trim());
+            return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+          }
+
+          function cmpVer(a, b) {
+            return (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]);
+          }
+
+          function shanghaiDate(date) {
+            return new Intl.DateTimeFormat('sv-SE', {
+              timeZone: 'Asia/Shanghai',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+            }).format(date);
+          }
+
+          const repo = process.env.REPO;
+          const event = process.env.EVENT_NAME;
+          const refName = process.env.REF_NAME;
+          const force = process.env.FORCE === 'true';
+
+          const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          requireCond(manifest.app === 'blockmd', "manifest.app must be 'blockmd'");
+          const pluginId = manifest.id.trim();
+          requireCond(/^[a-z0-9][a-z0-9-]{1,47}$/.test(pluginId), `invalid id: ${pluginId}`);
+          const baseVer = manifest.version.trim();
+          const mBase = /^(\d+)\.(\d+)\.(\d+)$/.exec(baseVer);
+          requireCond(Boolean(mBase), `manifest.version must be X.Y.Z, got ${baseVer}`);
+          const baseMajor = Number(mBase[1]);
+          const baseMinor = Number(mBase[2]);
+          const pluginTitle = (manifest.name?.en || pluginId).trim();
+
+          const headSha = sh('git', ['rev-parse', 'HEAD']);
+
+          const releases = [];
+          let pageNum = 1;
+          while (true) {
+            const page = JSON.parse(sh('gh', ['api', `repos/${repo}/releases?per_page=100&page=${pageNum}`]));
+            if (!Array.isArray(page) || page.length === 0) break;
+            releases.push(...page);
+            if (page.length < 100) break;
+            pageNum += 1;
+          }
+          const stable = releases
+            .filter((r) => !r.draft && !r.prerelease && parseVer(r.tag_name))
+            .sort((a, b) => cmpVer(parseVer(a.tag_name), parseVer(b.tag_name)));
+          const previous = stable.length > 0 ? stable[stable.length - 1] : null;
+
+          const taken = new Map();
+          const addTaken = (pv) => {
+            if (pv) taken.set(pv.join('.'), pv);
+          };
+          for (const r of releases) addTaken(parseVer(r.tag_name));
+          for (const t of sh('git', ['tag', '--list', 'v*']).split(/\r?\n/)) {
+            addTaken(parseVer(t));
+          }
+
+          function resolveTagSha(rel) {
+            if (!rel) return '';
+            const tag = rel.tag_name;
+            try {
+              const s = sh('git', ['rev-parse', `${tag}^{commit}`]);
+              if (/^[0-9a-f]{40}$/.test(s)) return s;
+            } catch {}
+            try {
+              const s = sh('gh', ['api', `repos/${repo}/commits/${tag}`, '--jq', '.sha']);
+              if (/^[0-9a-f]{40}$/.test(s)) return s;
+            } catch {}
+            return '';
+          }
+
+          let version;
+          let tag;
+          let prevSha = '';
+
+          if (event === 'push' && refName.startsWith('v')) {
+            const pv = parseVer(refName);
+            requireCond(Boolean(pv), `Tag ${refName} must match vX.Y.Z`);
+            version = `${pv[0]}.${pv[1]}.${pv[2]}`;
+            tag = `v${version}`;
+            const prevForNotes = [...stable].reverse().find((r) => r.tag_name !== tag) || null;
+            prevSha = resolveTagSha(prevForNotes);
+          } else {
+            if (event === 'schedule' && !force && previous && previous.published_at) {
+              const today = shanghaiDate(new Date());
+              const pubDay = shanghaiDate(new Date(previous.published_at));
+              if (today === pubDay) {
+                summary(`今日（${today}）已发布过 ${previous.tag_name}，每日定时最多自动发布一次，本次跳过。`);
+                setOutput({ should_release: 'no' });
+                process.exit(0);
+              }
+            }
+
+            prevSha = resolveTagSha(previous);
+            if (prevSha && prevSha === headSha && !force) {
+              summary(`当前 HEAD (${headSha.slice(0, 7)}) 与最新 Release ${previous.tag_name} 一致，跳过发版。`);
+              setOutput({ should_release: 'no' });
+              process.exit(0);
+            }
+
+            if (prevSha && !force) {
+              const isAnc = shCall('git', ['merge-base', '--is-ancestor', prevSha, headSha]);
+              if (isAnc) {
+                const changed = sh('git', ['diff', '--name-only', prevSha, headSha])
+                  .split(/\r?\n/)
+                  .filter((p) => p && !p.startsWith('.github/') && p !== '.gitignore' && p !== 'LICENSE');
+                if (changed.length === 0) {
+                  summary(`自 ${previous.tag_name} 以来仅包含 CI 或仓库元数据变更，无需发包，本次跳过。`);
+                  setOutput({ should_release: 'no' });
+                  process.exit(0);
+                }
+                const subjects = sh('git', ['log', '--no-merges', '--format=%s', `${prevSha}..${headSha}`])
+                  .split(/\r?\n/)
+                  .filter(Boolean);
+                if (subjects.length > 0 && subjects.every((s) => s.toLowerCase().includes('[skip release]'))) {
+                  summary('区间内提交均标记 [skip release]，本次跳过。');
+                  setOutput({ should_release: 'no' });
+                  process.exit(0);
+                }
+              }
+            }
+
+            const commitCount = Number(sh('git', ['rev-list', '--count', headSha]));
+            let cand = [baseMajor, baseMinor, commitCount];
+            const allTaken = [...taken.values()].sort(cmpVer);
+            const highest = allTaken.length > 0 ? allTaken[allTaken.length - 1] : null;
+            if (highest && cmpVer(cand, highest) <= 0) {
+              cand = [highest[0], highest[1], highest[2] + 1];
+            }
+            while (taken.has(cand.join('.'))) {
+              cand = [cand[0], cand[1], cand[2] + 1];
+            }
+            version = `${cand[0]}.${cand[1]}.${cand[2]}`;
+            tag = `v${version}`;
+          }
+
+          const notesLines = [];
+          if (prevSha && prevSha !== headSha && shCall('git', ['merge-base', '--is-ancestor', prevSha, headSha])) {
+            const rawLog = sh('git', ['log', '--no-merges', '--reverse', '--format=%h%x00%s', `${prevSha}..${headSha}`]);
+            for (const line of rawLog.split(/\r?\n/)) {
+              if (!line.trim()) continue;
+              const nul = line.indexOf('\0');
+              if (nul < 0) continue;
+              const cSha = line.slice(0, nul);
+              const subj = line.slice(nul + 1);
+              if (/^(?:ci|docs)(?:\([^)]*\))?:\s/i.test(subj)) continue;
+              notesLines.push(`- ${subj} (\`${cSha}\`)`);
+            }
+          }
+          if (notesLines.length === 0) {
+            notesLines.push(`- Automated release from \`${headSha.slice(0, 7)}\`.`);
+          }
+          fs.writeFileSync('release-notes.md', `## Changes\n\n${notesLines.join('\n')}\n`, 'utf8');
+
+          const pkgDir = path.join('dist', pluginId);
+          fs.rmSync('dist', { recursive: true, force: true });
+          fs.mkdirSync(pkgDir, { recursive: true });
+          const tarBytes = execFileSync('git', ['archive', '--format=tar', headSha]);
+          execFileSync('tar', ['-xf', '-', '-C', pkgDir], { input: tarBytes });
+          fs.rmSync(path.join(pkgDir, '.github'), { recursive: true, force: true });
+          for (const metaFile of ['.gitignore']) {
+            const p = path.join(pkgDir, metaFile);
+            if (fs.existsSync(p) && !fs.lstatSync(p).isSymbolicLink()) {
+              fs.rmSync(p);
+            }
+          }
+
+          try {
+            checkNoSymlinksTree(pkgDir);
+          } catch (err) {
+            console.error(`Bilingual release gate failed: ${err.message}`);
+            process.exit(1);
+          }
+
+          manifest.version = version;
+          fs.writeFileSync(path.join(pkgDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+
+          try {
+            await validateStagedPackage(pkgDir);
+          } catch (err) {
+            console.error(`Bilingual release gate failed: ${err.stack || err.message}`);
+            process.exit(1);
+          }
+
+          const archiveName = `${pluginId}-${tag}.tar.gz`;
+          execFileSync('tar', ['-czf', archiveName, '-C', 'dist', pluginId], { stdio: 'inherit' });
+
+          summary(`准备发布 ${pluginTitle} ${tag} (archive=${archiveName}, commit=${headSha.slice(0, 7)})`);
+          setOutput({
+            should_release: 'yes',
+            version,
+            tag,
+            title: `${pluginTitle} ${version}`,
+            archive: archiveName,
+            head_sha: headSha,
+          });
+          JS
 
       # 更新说明只经 tailnet 用 Magpie：Mac 在线先用 Mac 的 agy-cli/gemini-3.8-flash，再 VPS gpt-6-luna，最后 deepseek-flash。
       # 与 Block 主仓 scripts/release/release-notes.mjs 的顺序保持一致；不要用 Google AI Studio key。
